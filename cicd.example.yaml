@@ -1,0 +1,171 @@
+name: ci
+
+'on':
+  push:
+    branches:
+      - '**'
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Shared image coordinates for the publish job.
+  REGISTRY: gcr.forust.xyz
+  IMAGE_NAME: forust/telegram-scraper
+
+jobs:
+  lint-prettier:
+    runs-on: [self-hosted, linux, arch, homelab]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check formatting with Prettier
+        shell: bash
+        run: |
+          mapfile -t prettier_files < <(
+            git ls-files \
+              | grep -E '\.(md|json|ya?ml|html|css)$' \
+              | grep -Ev '^(\.docs/|\.zed/|errorpages/html/|homepages/(forust_files|xdfnx_files)/)'
+          )
+
+          if [ "${#prettier_files[@]}" -eq 0 ]; then
+            echo "No Prettier-managed files found."
+            exit 0
+          fi
+
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            node:22-alpine \
+            sh -lc 'npx --yes prettier@3 --check --ignore-unknown "$@"' sh "${prettier_files[@]}"
+
+  lint-ruff:
+    runs-on: [self-hosted, linux, arch, homelab]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lint Python with Ruff
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            ghcr.io/astral-sh/ruff:latest \
+            check .
+
+  lint-yaml:
+    runs-on: [self-hosted, linux, arch, homelab]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lint YAML syntax
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            cytopia/yamllint:latest \
+            -c .yamllint .
+
+  lint-dockerfiles:
+    runs-on: [self-hosted, linux, arch, homelab]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lint Dockerfiles
+        shell: bash
+        run: |
+          mapfile -t dockerfiles < <(
+            git ls-files ':(glob)**/Dockerfile' ':(glob)**/Dockerfile.*'
+          )
+
+          if [ "${#dockerfiles[@]}" -eq 0 ]; then
+            echo "No Dockerfiles found."
+            exit 0
+          fi
+
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            --entrypoint hadolint \
+            hadolint/hadolint:latest-debian \
+            -c .hadolint.yaml "${dockerfiles[@]}"
+
+  validate:
+    runs-on: [self-hosted, linux, arch, homelab]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate Kubernetes manifests
+        shell: bash
+        run: |
+          mapfile -t manifests < <(
+            git ls-files ':(glob)**/k8s/**/*.yaml' ':(glob)**/k8s/**/*.yml' \
+              | grep -Ev '(^|/)(kustomization\.ya?ml|.*\.example\.ya?ml|.*values\.ya?ml|patch-.*\.ya?ml)$'
+          )
+
+          if [ "${#manifests[@]}" -eq 0 ]; then
+            echo "No Kubernetes manifests found."
+            exit 0
+          fi
+
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            ghcr.io/yannh/kubeconform:latest \
+            -strict \
+            -ignore-missing-schemas \
+            -summary \
+            "${manifests[@]}"
+
+  publish:
+    needs: [lint-prettier, lint-ruff, lint-yaml, lint-dockerfiles, validate]
+    if: github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'dev')
+    runs-on: [self-hosted, linux, arch, homelab]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read project version
+        id: version
+        shell: bash
+        run: |
+          version="$(python3 -c 'from pathlib import Path; import tomllib; print(tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"])')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to registry
+        shell: bash
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${REGISTRY}" \
+            -u "${{ secrets.REGISTRY_USERNAME }}" \
+            --password-stdin
+
+      - name: Build and push image
+        shell: bash
+        run: |
+          image="${REGISTRY}/${IMAGE_NAME}"
+          tags=("latest" "${{ steps.version.outputs.version }}")
+
+          case "${GITHUB_REF_NAME}" in
+            main)
+              tags+=("main" "prod")
+              ;;
+            dev)
+              tags+=("dev")
+              ;;
+          esac
+
+          build_args=()
+          for tag in "${tags[@]}"; do
+            build_args+=(-t "${image}:${tag}")
+          done
+
+          docker build "${build_args[@]}" .
+
+          for tag in "${tags[@]}"; do
+            docker push "${image}:${tag}"
+          done

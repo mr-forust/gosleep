@@ -1,0 +1,7 @@
+gosleep-timer
+*.test
+*.out
+*.exe
+.DS_Store
+cover.out
+vendor/
