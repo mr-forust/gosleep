@@ -1,0 +1,93 @@
+name: release
+
+"on":
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux-amd64:
+    runs-on: [self-hosted, linux, arch, homelab]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --locked
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          tag="${GITHUB_REF##*/}"
+          version="${tag#v}"
+          mkdir -p dist
+          cp target/release/gosleep-timer dist/gosleep-timer
+          tar -C dist -czf "dist/gosleep-timer-${version}-linux-amd64.tar.gz" gosleep-timer
+          sha256sum "dist/gosleep-timer-${version}-linux-amd64.tar.gz" > "dist/gosleep-timer-${version}-linux-amd64.tar.gz.sha256"
+
+      - name: Create Gitea release
+        id: release
+        shell: bash
+        run: |
+          tag="${GITHUB_REF##*/}"
+          release_url="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases"
+          existing="$(curl -fsS \
+            "${release_url}/tags/${tag}" \
+            -H "Authorization: token ${GITEA_TOKEN}" || true)"
+          release_id="$(printf '%s' "$existing" | jq -r '.id // empty')"
+
+          if [ -z "$release_id" ]; then
+            body="$(cat <<EOF
+          Release ${tag}
+
+          See CHANGELOG.md for notable changes.
+          EOF
+            )"
+            payload="$(jq -n \
+              --arg tag "${tag}" \
+              --arg commit "${GITHUB_SHA}" \
+              --arg name "gosleep-timer ${tag}" \
+              --arg body "$body" \
+              '{tag_name: $tag, target_commitish: $commit, name: $name, body: $body, draft: false, prerelease: false}')"
+            response="$(curl -fsS \
+              -X POST "${release_url}" \
+              -H "Authorization: token ${GITEA_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$payload")"
+            release_id="$(printf '%s' "$response" | jq -r '.id')"
+          fi
+
+          test -n "$release_id" && test "$release_id" != "null"
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Gitea release assets
+        shell: bash
+        run: |
+          release_id="${{ steps.release.outputs.release_id }}"
+          for asset in dist/*.tar.gz dist/*.sha256; do
+            name="$(basename "$asset")"
+            release="$(curl -fsS \
+              "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              -H "Authorization: token ${GITEA_TOKEN}")"
+            asset_id="$(printf '%s' "$release" | jq -r --arg name "$name" '.assets[]? | select(.name == $name) | .id' | head -n 1)"
+            if [ -n "$asset_id" ]; then
+              curl -fsS \
+                -X DELETE "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets/${asset_id}" \
+                -H "Authorization: token ${GITEA_TOKEN}"
+            fi
+            curl -fsS \
+              -X POST "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${name}" \
+              -H "Authorization: token ${GITEA_TOKEN}" \
+              -F "attachment=@${asset}"
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: gosleep-timer-linux-amd64
+          path: dist/*

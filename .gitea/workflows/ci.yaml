@@ -1,0 +1,46 @@
+name: ci
+
+"on":
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rust:
+    runs-on: [self-hosted, linux, arch, homelab]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check formatting
+        shell: bash
+        run: cargo fmt --check
+
+      - name: Run tests
+        shell: bash
+        run: cargo test --locked
+
+      - name: Run clippy
+        shell: bash
+        run: cargo clippy --locked -- -D warnings
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --locked
+
+  lint-yaml:
+    runs-on: [self-hosted, linux, arch, homelab]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lint YAML
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            cytopia/yamllint:latest \
+            -c .yamllint .

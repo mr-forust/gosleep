@@ -1,7 +1,8 @@
-gosleep-timer
-*.test
-*.out
-*.exe
+/target/
+/dist/
+/.env
+/.env.*
+*.log
+*.tmp
+*.bak
 .DS_Store
-cover.out
-vendor/

@@ -1,200 +1,213 @@
-# ⏱ gosleep-timer
+# gosleep-timer
 
-TUI sleep timer with modular WM/DE support. Go rewrite of `timer.py`.
+Rust TUI sleep timer for Linux desktop actions.
 
-## Quick start
+`gosleep-timer` waits for a configured duration, then runs post-countdown desktop commands such as switching workspace, stopping media, dimming brightness, muting audio, locking the session, killing selected processes, powering off/rebooting, or running custom shell commands.
+
+## Status
+
+- Current version: `1.1.1`
+- Release tags: `vMAJOR.MINOR.PATCH`, for example `v1.1.1`
+- Primary repository: <https://gitea.forust.xyz/forust/gosleep>
+- SSH upstream: `ssh://git@gitssh.forust.xyz:2221/forust/gosleep.git`
+
+## Features
+
+- Single Rust binary, independent of Python.
+- Ratatui/Crossterm terminal UI.
+- YAML config at `~/.config/gosleep-timer/config.yaml` or `$XDG_CONFIG_HOME/gosleep-timer/config.yaml`.
+- CLI commands for initialization, preview, and direct timer runs.
+- Time-left display and progress bar.
+- Wrapped command preview for smaller terminals.
+- Linux desktop action support for niri, Hyprland, KDE, playerctl, brightnessctl/light, PipeWire/PulseAudio, systemd, and custom shell commands.
+
+## Install
+
+### From source
 
 ```bash
-# Run TUI
-gosleep-timer
-
-# First time? Interactive setup wizard
-gosleep-timer init
+git clone ssh://git@gitssh.forust.xyz:2221/forust/gosleep.git
+cd gosleep
+cargo build --release --locked
+install -Dm755 target/release/gosleep-timer ~/.local/bin/gosleep-timer
 ```
 
-## Installation
+### From release artifact
+
+Download `gosleep-timer-<version>-linux-amd64.tar.gz` from the Gitea release page, then:
 
 ```bash
-go install github.com/forust/gosleep-timer@latest
-# or
-git clone https://github.com/forust/gosleep-timer
-cd gosleep-timer
-go build -o gosleep-timer .
-sudo cp gosleep-timer /usr/local/bin/
+tar -xzf gosleep-timer-1.1.1-linux-amd64.tar.gz
+install -Dm755 gosleep-timer ~/.local/bin/gosleep-timer
 ```
 
 ## Usage
 
-### TUI mode (default)
+Open the TUI:
 
 ```bash
 gosleep-timer
 ```
 
-Keys:
-| Key | Action |
-|-----|--------|
-| `s` | Start timer |
-| `S` | Stop timer |
-| `Tab` | Next field |
-| `↑`/`↓` | Previous/next profile |
-| `1`-`0` | Toggle modules |
-| `h` | History |
-| `?` | Help |
-| `q`/`Esc` | Quit |
-
-### CLI mode
+Initialize the default config:
 
 ```bash
-# Run with defaults (25m)
-gosleep-timer run
+gosleep-timer init
+```
 
-# Custom duration
+Preview commands that will run after the countdown:
+
+```bash
+gosleep-timer preview
+```
+
+Run the saved timer config:
+
+```bash
+gosleep-timer run
+```
+
+Override the duration for one run:
+
+```bash
 gosleep-timer run 45m
 gosleep-timer run 1h30m
-
-# With profile
-gosleep-timer run 20m --profile work
 ```
 
-### Other commands
+Use a custom config path:
 
 ```bash
-# Interactive setup
-gosleep-timer init
-
-# List profiles
-gosleep-timer list-profiles
-
-# Export/import config
-gosleep-timer export > config-backup.yaml
-gosleep-timer import < config-backup.yaml
-
-# History and stats
-gosleep-timer history
-gosleep-timer stats
+gosleep-timer --config ./config.yaml preview
 ```
+
+## TUI Keys
+
+| Key | Action |
+| --- | --- |
+| `j` / `Down` | Move down |
+| `k` / `Up` | Move up |
+| `Space` / `Enter` | Toggle, cycle, or edit focused field |
+| `Enter` while editing | Apply edit |
+| `Esc` while editing | Cancel edit |
+| `r` | Start/restart timer |
+| `x` | Stop timer |
+| `s` | Save config |
+| `q` / `Esc` | Quit |
 
 ## Configuration
 
-File: `~/.config/gosleep-timer/config.yaml`
-
-### Profiles
+Default config:
 
 ```yaml
-profiles:
-  default:
-    modules:
-      workspace:
-        enabled: true
-        backend: auto        # auto, niri, hyprland, kde
-        workspace: 12
-      media:
-        enabled: true
-        action: stop         # stop, pause, play-pause, next, previous
-      lock:
-        enabled: true
-        command: ""          # custom command or auto-detect
-      kill:
-        enabled: false
-        processes: [firefox, telegram-desktop]
-      notify:
-        enabled: true
-        sound: ""            # path or empty
-      sound:
-        enabled: true
-        file: /usr/share/sounds/freedesktop/stereo/complete.oga
-      brightness:
-        enabled: false
-        value: 0
-      mute:
-        enabled: false
-      custom:
-        enabled: false
-        pre: []
-        post: []
-      script:
-        enabled: false
-        path: ""
-
-  work:
-    extends: default
-    modules:
-      workspace:
-        workspace: 5
+duration: 25m
+actions:
+  workspace:
+    enabled: true
+    backend: auto
+    number: 3
+  media:
+    enabled: true
+    action: stop
+  brightness:
+    enabled: false
+    value: 30
+  mute:
+    enabled: false
+  lock:
+    enabled: false
+    command: loginctl lock-session
+  kill:
+    enabled: false
+    processes: []
+  power:
+    mode: none
+  custom:
+    enabled: false
+    commands: []
 ```
 
-### Profile inheritance
+Supported values:
 
-Profiles can extend others. Modules from the base profile are merged and overlaid.
+| Field | Values |
+| --- | --- |
+| `duration` | Go-style duration strings such as `25m`, `45m`, `1h30m`, `10s` |
+| `actions.workspace.backend` | `auto`, `niri`, `hyprland`, `kde` |
+| `actions.media.action` | `none`, `stop`, `pause`, `play-pause`, `next`, `previous` |
+| `actions.power.mode` | `none`, `poweroff`, `reboot` |
 
-## Modules
+## Commands Run After Countdown
 
-| Module | Stage | Description |
-|--------|-------|-------------|
-| **workspace** | pre | Switch WM workspace (niri/Hyprland/KDE) |
-| **media** | pre | Control music player via playerctl |
-| **lock** | post | Lock screen |
-| **kill** | pre | Kill processes by name |
-| **notify** | post | Desktop notification |
-| **sound** | post | Play audio file |
-| **brightness** | pre/post | Dim/restore brightness |
-| **mute** | pre/post | Mute/unmute audio |
-| **custom** | pre/post | User-defined shell commands |
-| **script** | pre/post | Run external script with args |
+`auto` workspace backend tries:
 
-### Workspace backends
-
-| Backend | Command |
-|---------|---------|
-| niri | `niri msg action focus-workspace {n}` |
-| Hyprland | `hyprctl dispatch workspace {n}` |
-| KDE | `qdbus org.kde.KWin /KWin setCurrentDesktop {n}` |
-
-Auto-detection checks `$XDG_CURRENT_DESKTOP`, then tries `hyprctl` and `niri msg`.
-
-## Project structure
-
+```sh
+niri msg action focus-workspace <number>
+hyprctl dispatch workspace <number>
+qdbus org.kde.KWin /KWin org.kde.KWin.setCurrentDesktop <number>
 ```
-gosleep-timer/
-├── main.go                 # CLI entrypoint
-├── cmd_init.go             # Interactive setup wizard
-├── config/                 # YAML config load/save/types
-├── engine/                 # Timer core, executor, stages
-├── modules/                # Module interface + 10 implementations
-├── profiles/               # Profile manager
-├── history/                # JSONL log + statistics
-├── tui/                    # Bubbletea TUI app
-├── cicd.yaml               # CI/CD pipeline
-└── Dockerfile              # Multi-stage build
-```
+
+Other actions use common Linux desktop tools:
+
+- `playerctl`
+- `brightnessctl` or `light`
+- `wpctl` or `pactl`
+- `loginctl`
+- `pkill`
+- `systemctl`
+
+Install only the tools needed for the actions you enable.
 
 ## Development
 
 ```bash
-# Build
-go build -o gosleep-timer .
-
-# Test
-go test ./...
-
-# Lint
-golangci-lint run --config .golangci.yml
-
-# Static analysis
-staticcheck ./...
-gosec ./...
-revive -config .revive.toml ./...
+cargo fmt --check
+cargo test --locked
+cargo clippy --locked -- -D warnings
+cargo build --release --locked
 ```
 
-## CI/CD
+Local smoke test:
 
-Pipeline (`.github/workflows/cicd.yaml`):
-- **lint-go**: golangci-lint, staticcheck, gosec, revive
-- **lint-yaml**: yamllint
-- **build**: go build + test with race detector
-- **publish**: Docker image to registry (main/dev branches)
+```bash
+tmpdir="$(mktemp -d)"
+cargo run -- --config "$tmpdir/config.yaml" init
+cargo run -- --config "$tmpdir/config.yaml" preview
+```
+
+## Versioning
+
+Version is stored in:
+
+- `Cargo.toml`
+- `Cargo.lock`
+- `VERSION`
+- `CHANGELOG.md`
+
+Release tags must match the package version:
+
+```bash
+git tag -a v1.1.1 -m "gosleep-timer v1.1.1"
+git push origin main --tags
+```
+
+## Releases
+
+Gitea Actions builds releases from tags matching `v*.*.*`.
+
+Required runner tools:
+
+- Rust stable toolchain with `cargo`, `rustfmt`, and `clippy`
+- `curl`
+- `jq`
+- `tar`
+- `sha256sum`
+
+Release authentication:
+
+- The workflow uses Gitea Actions' built-in `GITEA_TOKEN`.
+- The workflow declares `permissions: contents: write` so the token can create releases and upload assets.
+
+See [RELEASING.md](RELEASING.md) for the full release checklist.
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
