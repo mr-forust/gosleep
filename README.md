@@ -6,8 +6,7 @@ Rust TUI sleep timer for Linux desktop actions.
 
 ## Status
 
-- Current version: `1.1.1`
-- Release tags: `vMAJOR.MINOR.PATCH`, for example `v1.1.1`
+- Release tags: `vMAJOR.MINOR.PATCH`
 - Primary repository: <https://gitea.forust.xyz/forust/gosleep>
 - SSH upstream: `ssh://git@gitssh.forust.xyz:2221/forust/gosleep.git`
 
@@ -37,7 +36,7 @@ install -Dm755 target/release/gosleep-timer ~/.local/bin/gosleep-timer
 Download `gosleep-timer-<version>-linux-amd64.tar.gz` from the Gitea release page, then:
 
 ```bash
-tar -xzf gosleep-timer-1.1.1-linux-amd64.tar.gz
+tar -xzf gosleep-timer-<version>-linux-amd64.tar.gz
 install -Dm755 gosleep-timer ~/.local/bin/gosleep-timer
 ```
 
@@ -185,7 +184,7 @@ Version is stored in:
 Release tags must match the package version:
 
 ```bash
-git tag -a v1.1.1 -m "gosleep-timer v1.1.1"
+git tag -a vMAJOR.MINOR.PATCH -m "gosleep-timer vMAJOR.MINOR.PATCH"
 git push origin main --tags
 ```
 
