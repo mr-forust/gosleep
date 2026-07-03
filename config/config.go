@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -70,7 +71,7 @@ func LoadOrCreate(path string) (*Config, error) {
 		return cfg, nil
 	}
 
-	if !os.IsNotExist(err) {
+	if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 

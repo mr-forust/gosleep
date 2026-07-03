@@ -319,7 +319,7 @@ func init() {
 
 	runCmd := &cobra.Command{
 		Use:   "run [duration]",
-		Short: "Run timer in CLI mode (no TUI)",
+		Short: "Run timer in CLI mode",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cliMode = true
