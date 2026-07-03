@@ -40,7 +40,7 @@ https://gitea.forust.xyz/forust/gosleep.git
    - `sha256sum`
    - Docker, if using the YAML lint job as written
 4. Confirm Actions job token permissions allow `contents: write`.
-   The release workflow uses Gitea Actions' built-in `GITEA_TOKEN`; no extra repository secret is required.
+   The release workflow uses Gitea Actions' built-in `GITEA_TOKEN`, exposed in the workflow as `${{ secrets.GITEA_TOKEN }}`; no extra repository secret is required.
 
 ## Version Bump Checklist
 
@@ -78,13 +78,15 @@ git push origin v1.1.2
 
 The `.gitea/workflows/release.yaml` workflow will:
 
-1. Build `target/release/gosleep-timer`.
-2. Package `gosleep-timer-<version>-linux-amd64.tar.gz`.
-3. Generate a SHA-256 checksum.
-4. Create a Gitea release.
-5. Upload the archive and checksum as release assets.
+1. Re-run release gates: `cargo fmt --check`, `cargo test --locked`, `cargo clippy --locked -- -D warnings`, and YAML lint.
+2. Build `target/release/gosleep-timer`.
+3. Package `gosleep-timer-<version>-linux-amd64.tar.gz`.
+4. Generate a SHA-256 checksum.
+5. Create a Gitea release.
+6. Upload the archive and checksum as release assets.
 
 The workflow is idempotent: if the release already exists, it reuses it and replaces assets with matching names.
+If any lint or test step fails, the build and release job will not run.
 
 ## Manual Asset Build
 

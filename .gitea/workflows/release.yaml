@@ -10,8 +10,38 @@ permissions:
   contents: write
 
 jobs:
-  linux-amd64:
+  verify:
     runs-on: [self-hosted, linux, arch, homelab]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check formatting
+        shell: bash
+        run: cargo fmt --check
+
+      - name: Run tests
+        shell: bash
+        run: cargo test --locked
+
+      - name: Run clippy
+        shell: bash
+        run: cargo clippy --locked -- -D warnings
+
+      - name: Lint YAML
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            cytopia/yamllint:latest \
+            -c .yamllint .
+
+  linux-amd64:
+    needs: verify
+    runs-on: [self-hosted, linux, arch, homelab]
+    env:
+      GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
