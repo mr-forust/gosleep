@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
-    process::Command,
+    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -199,7 +199,13 @@ fn main() -> Result<()> {
             if let Some(duration) = duration {
                 config.duration = duration;
             }
-            run_timer(&config, &Arc::new(AtomicBool::new(false)))
+            let mut stdout = io::stdout();
+            run_timer(
+                &config,
+                &Arc::new(AtomicBool::new(false)),
+                RunMode::Cli,
+                Some(&mut stdout),
+            )
         }
         Some(Commands::Preview) => {
             for command in preview_commands(&config) {
@@ -467,42 +473,86 @@ fn preview_commands(config: &Config) -> Vec<String> {
         .collect()
 }
 
-fn run_timer(config: &Config, stop: &Arc<AtomicBool>) -> Result<()> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunMode {
+    Cli,
+    Tui,
+}
+
+fn write_timer_line(output: &mut dyn Write, message: &str) {
+    writeln!(output, "{message}").ok();
+}
+
+fn write_timer_progress(output: &mut dyn Write, message: &str) {
+    write!(output, "\r{message}").ok();
+    output.flush().ok();
+}
+
+fn run_timer(
+    config: &Config,
+    stop: &Arc<AtomicBool>,
+    mode: RunMode,
+    mut output: Option<&mut dyn Write>,
+) -> Result<()> {
     validate_config(config)?;
     let duration = parse_duration(&config.duration)?;
     let started = Instant::now();
-    println!("timer started: {}", config.duration);
+    if let Some(output) = output.as_deref_mut() {
+        write_timer_line(output, &format!("timer started: {}", config.duration));
+    }
 
     loop {
         if stop.load(Ordering::Relaxed) {
-            println!("\nstopped");
+            if let Some(output) = output.as_deref_mut() {
+                write_timer_line(output, "stopped");
+            }
             bail!("timer stopped");
         }
         let elapsed = started.elapsed();
         if elapsed >= duration {
             break;
         }
-        print!("\rremaining: {}", format_duration(duration - elapsed));
-        io::stdout().flush().ok();
+        if let Some(output) = output.as_deref_mut() {
+            write_timer_progress(
+                output,
+                &format!("remaining: {}", format_duration(duration - elapsed)),
+            );
+        }
         thread::sleep(Duration::from_millis(250));
     }
 
-    println!("\nfinished");
+    if let Some(output) = output.as_deref_mut() {
+        write_timer_line(output, "finished");
+    }
     for command in build_action_commands(config) {
-        println!("run: {}", command.display());
-        run_command(&command).with_context(|| format!("{} failed", command.label))?;
+        if let Some(output) = output.as_deref_mut() {
+            write_timer_line(output, &format!("run: {}", command.display()));
+        }
+        run_command(&command, mode).with_context(|| format!("{} failed", command.label))?;
     }
     Ok(())
 }
 
-fn run_command(command: &ActionCommand) -> Result<()> {
+fn prepare_command_stdio(process: &mut Command, mode: RunMode) {
+    if mode == RunMode::Tui {
+        process.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+}
+
+fn run_command(command: &ActionCommand, mode: RunMode) -> Result<()> {
     let status = if let Some(shell) = &command.shell {
-        Command::new("sh").arg("-c").arg(shell).status()?
+        let mut process = Command::new("sh");
+        process.arg("-c").arg(shell);
+        prepare_command_stdio(&mut process, mode);
+        process.status()?
     } else {
         let Some(program) = command.args.first() else {
             return Ok(());
         };
-        Command::new(program).args(&command.args[1..]).status()?
+        let mut process = Command::new(program);
+        process.args(&command.args[1..]);
+        prepare_command_stdio(&mut process, mode);
+        process.status()?
     };
     if !status.success() {
         bail!("command exited with {status}");
@@ -601,7 +651,7 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        if area.width < 36 || area.height < 10 {
+        if area.width < 36 || area.height < 11 {
             frame.render_widget(Paragraph::new("terminal too small"), area);
             return;
         }
@@ -609,7 +659,7 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(4),
+                Constraint::Length(5),
                 Constraint::Min(5),
                 Constraint::Length(1),
             ])
@@ -633,14 +683,10 @@ impl App {
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
         let (_, remaining, progress) = self.timer_snapshot();
-        let label = if self.timer.is_some() {
-            format!("time left: {}", format_duration(remaining))
-        } else {
-            "timer not started".to_string()
-        };
         let header = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Length(1),
@@ -665,11 +711,20 @@ impl App {
             header[2],
         );
         frame.render_widget(
+            Paragraph::new(format_time_left_text(
+                self.timer.as_ref(),
+                remaining,
+                header[3].width,
+            ))
+            .style(Style::default().fg(Color::White)),
+            header[3],
+        );
+        frame.render_widget(
             Gauge::default()
                 .gauge_style(Style::default().fg(Color::Magenta))
-                .label(format!("{label} {:>3}%", (progress * 100.0).round() as u16))
+                .label(format_gauge_label(progress))
                 .ratio(progress),
-            header[3],
+            header[4],
         );
     }
 
@@ -847,7 +902,7 @@ impl App {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let config = self.config.clone();
-        let handle = thread::spawn(move || run_timer(&config, &thread_stop));
+        let handle = thread::spawn(move || run_timer(&config, &thread_stop, RunMode::Tui, None));
         self.timer = Some(TimerState {
             started: Instant::now(),
             duration,
@@ -1090,6 +1145,40 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
+fn format_compact_duration(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+fn format_time_left_text(timer: Option<&TimerState>, remaining: Duration, width: u16) -> String {
+    if timer.is_none() {
+        return "time left: --".to_string();
+    }
+
+    let full = format!("time left: {}", format_duration(remaining));
+    if full.len() <= width as usize {
+        return full;
+    }
+
+    let compact = format!("left: {}", format_compact_duration(remaining));
+    if compact.len() <= width as usize {
+        return compact;
+    }
+
+    format_compact_duration(remaining)
+}
+
+fn format_gauge_label(progress: f64) -> String {
+    format!("{:>3}%", (progress * 100.0).round() as u16)
+}
+
 fn wrap_command(command: &str, width: usize) -> Vec<String> {
     let width = width.max(8);
     let mut lines = Vec::new();
@@ -1124,6 +1213,22 @@ fn split_list(value: &str, separator: char) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quiet_config(duration: &str) -> Config {
+        let mut config = Config {
+            duration: duration.to_string(),
+            ..Config::default()
+        };
+        config.actions.workspace.enabled = false;
+        config.actions.media.enabled = false;
+        config.actions.brightness.enabled = false;
+        config.actions.mute.enabled = false;
+        config.actions.lock.enabled = false;
+        config.actions.kill.enabled = false;
+        config.actions.power.mode = "none".to_string();
+        config.actions.custom.enabled = false;
+        config
+    }
 
     #[test]
     fn parse_duration_accepts_go_style_values() {
@@ -1168,5 +1273,64 @@ mod tests {
             split_list("firefox, telegram-desktop, ", ','),
             vec!["firefox", "telegram-desktop"]
         );
+    }
+
+    #[test]
+    fn run_timer_quiet_mode_writes_nothing() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let config = quiet_config("1ns");
+
+        run_timer(&config, &stop, RunMode::Tui, None).unwrap();
+    }
+
+    #[test]
+    fn run_timer_cli_mode_writes_status_lines() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let config = quiet_config("10ms");
+        let mut output = Vec::new();
+
+        run_timer(&config, &stop, RunMode::Cli, Some(&mut output)).unwrap();
+
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("timer started: 10ms"));
+        assert!(text.contains("remaining:"));
+        assert!(text.contains("finished"));
+    }
+
+    #[test]
+    fn timer_header_text_compacts_for_narrow_widths() {
+        let remaining = Duration::from_secs(65);
+
+        assert_eq!(format_time_left_text(None, remaining, 20), "time left: --");
+        assert_eq!(
+            format_time_left_text(Some(&dummy_timer_state()), remaining, 40),
+            "time left: 1m5s"
+        );
+        assert_eq!(
+            format_time_left_text(Some(&dummy_timer_state()), remaining, 12),
+            "left: 01:05"
+        );
+        assert_eq!(
+            format_time_left_text(Some(&dummy_timer_state()), remaining, 5),
+            "01:05"
+        );
+    }
+
+    #[test]
+    fn gauge_label_is_short_percent_only() {
+        assert_eq!(format_gauge_label(0.0), "  0%");
+        assert_eq!(format_gauge_label(0.58), " 58%");
+        assert_eq!(format_gauge_label(1.0), "100%");
+    }
+
+    fn dummy_timer_state() -> TimerState {
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = thread::spawn(|| Ok(()));
+        TimerState {
+            started: Instant::now(),
+            duration: Duration::from_secs(1),
+            stop,
+            handle,
+        }
     }
 }
