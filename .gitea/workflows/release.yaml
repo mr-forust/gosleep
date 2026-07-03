@@ -35,7 +35,7 @@ jobs:
         shell: bash
         run: |
           tag="${GITHUB_REF##*/}"
-          release_url="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases"
+          release_url="https://gitea.forust.xyz/api/v1/repos/forust/gosleep/releases"
           existing="$(curl -fsS \
             "${release_url}/tags/${tag}" \
             -H "Authorization: token ${GITEA_TOKEN}" || true)"
@@ -68,20 +68,21 @@ jobs:
       - name: Upload Gitea release assets
         shell: bash
         run: |
+          release_url="https://gitea.forust.xyz/api/v1/repos/forust/gosleep/releases"
           release_id="${{ steps.release.outputs.release_id }}"
           for asset in dist/*.tar.gz dist/*.sha256; do
             name="$(basename "$asset")"
             release="$(curl -fsS \
-              "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              "${release_url}/${release_id}" \
               -H "Authorization: token ${GITEA_TOKEN}")"
             asset_id="$(printf '%s' "$release" | jq -r --arg name "$name" '.assets[]? | select(.name == $name) | .id' | head -n 1)"
             if [ -n "$asset_id" ]; then
               curl -fsS \
-                -X DELETE "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets/${asset_id}" \
+                -X DELETE "${release_url}/${release_id}/assets/${asset_id}" \
                 -H "Authorization: token ${GITEA_TOKEN}"
             fi
             curl -fsS \
-              -X POST "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${name}" \
+              -X POST "${release_url}/${release_id}/assets?name=${name}" \
               -H "Authorization: token ${GITEA_TOKEN}" \
               -F "attachment=@${asset}"
           done
