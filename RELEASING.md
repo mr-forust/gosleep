@@ -80,10 +80,10 @@ The `.gitea/workflows/release.yaml` workflow will:
 
 1. Re-run release gates: `cargo fmt --check`, `cargo test --locked`, `cargo clippy --locked -- -D warnings`, and YAML lint.
 2. Build `target/release/gosleep-timer`.
-3. Package `gosleep-timer-<version>-linux-amd64.tar.gz`.
+3. Copy binary as `gosleep-timer-<version>-linux-amd64`.
 4. Generate a SHA-256 checksum.
 5. Create a Gitea release.
-6. Upload the archive and checksum as release assets.
+6. Upload the binary and checksum as release assets.
 
 The workflow is idempotent: if the release already exists, it reuses it and replaces assets with matching names.
 If any lint or test step fails, the build and release job will not run.
@@ -96,7 +96,7 @@ If Actions are unavailable:
 version="$(cat VERSION)"
 cargo build --release --locked
 mkdir -p dist
-cp target/release/gosleep-timer dist/gosleep-timer
-tar -C dist -czf "dist/gosleep-timer-${version}-linux-amd64.tar.gz" gosleep-timer
-sha256sum "dist/gosleep-timer-${version}-linux-amd64.tar.gz" > "dist/gosleep-timer-${version}-linux-amd64.tar.gz.sha256"
+binary="gosleep-timer-${version}-linux-amd64"
+cp target/release/gosleep-timer "dist/${binary}"
+sha256sum "dist/${binary}" > "dist/${binary}.sha256"
 ```

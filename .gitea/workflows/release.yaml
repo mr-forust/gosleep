@@ -56,9 +56,9 @@ jobs:
           tag="${GITHUB_REF##*/}"
           version="${tag#v}"
           mkdir -p dist
-          cp target/release/gosleep-timer dist/gosleep-timer
-          tar -C dist -czf "dist/gosleep-timer-${version}-linux-amd64.tar.gz" gosleep-timer
-          sha256sum "dist/gosleep-timer-${version}-linux-amd64.tar.gz" > "dist/gosleep-timer-${version}-linux-amd64.tar.gz.sha256"
+          binary="gosleep-timer-${version}-linux-amd64"
+          cp target/release/gosleep-timer "dist/${binary}"
+          sha256sum "dist/${binary}" > "dist/${binary}.sha256"
 
       - name: Create Gitea release
         id: release
@@ -100,7 +100,7 @@ jobs:
         run: |
           release_url="https://gitea.forust.xyz/api/v1/repos/forust/gosleep/releases"
           release_id="${{ steps.release.outputs.release_id }}"
-          for asset in dist/*.tar.gz dist/*.sha256; do
+          for asset in dist/gosleep-timer-* dist/gosleep-timer-*.sha256; do
             name="$(basename "$asset")"
             release="$(curl -fsS \
               "${release_url}/${release_id}" \
