@@ -1669,6 +1669,7 @@ fn format_gauge_label(progress: f64) -> String {
 }
 
 fn ascii_time(value: &str) -> Vec<String> {
+    const GLYPH_WIDTH: usize = 10;
     let mut rows = vec![String::new(); 7];
     for ch in value.chars() {
         let glyph = ascii_glyph(ch);
@@ -1676,7 +1677,7 @@ fn ascii_time(value: &str) -> Vec<String> {
             if !row.is_empty() {
                 row.push(' ');
             }
-            row.push_str(part);
+            row.push_str(&format!("{part:<GLYPH_WIDTH$}"));
         }
     }
     rows
@@ -2042,6 +2043,16 @@ mod tests {
         assert!(keys.contains(&FieldKey::LockCommand));
         assert!(keys.contains(&FieldKey::KillProcesses));
         assert!(keys.contains(&FieldKey::CustomCommands));
+    }
+
+    #[test]
+    fn ascii_time_rows_have_equal_width() {
+        let rows = ascii_time("14:45:27");
+        let width = rows.first().map(String::len).unwrap_or(0);
+
+        assert_eq!(rows.len(), 7);
+        assert!(width > 0);
+        assert!(rows.iter().all(|row| row.len() == width));
     }
 
     fn visible_field_keys(config: &Config) -> Vec<FieldKey> {

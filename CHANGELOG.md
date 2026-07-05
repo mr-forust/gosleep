@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`.
 
+## [1.2.1] - 2026-07-05
+
+### Changed
+
+- Updated the TUI running screen to center a larger termdown-style ASCII time-left display above progress and post-countdown commands.
+
 ## [1.2.0] - 2026-07-05
 
 ### Added
@@ -42,6 +48,7 @@ The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`
 - Added YAML configuration, CLI `init`, `preview`, and `run` commands.
 - Added Gitea CI and tag-based release workflows.
 
+[1.2.1]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.2.1
 [1.2.0]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.2.0
 [1.1.3]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.1.3
 [1.1.2]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.1.2

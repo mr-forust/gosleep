@@ -1,6 +1,6 @@
 [package]
 name = "gosleep-timer"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Terminal sleep timer for Linux desktop actions, with YAML config and a Rust TUI"
