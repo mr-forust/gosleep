@@ -242,6 +242,7 @@ fn ensure_config(path: &PathBuf) -> Result<Config> {
     let data = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut config: Config = serde_yaml::from_str(&data).context("parse config")?;
     normalize_config(&mut config);
+    validate_config(&config)?;
     Ok(config)
 }
 
@@ -521,14 +522,31 @@ fn run_timer(
         thread::sleep(Duration::from_millis(250));
     }
 
+    if stop.load(Ordering::Relaxed) {
+        if let Some(output) = output.as_deref_mut() {
+            write_timer_line(output, "stopped");
+        }
+        bail!("timer stopped");
+    }
+
     if let Some(output) = output.as_deref_mut() {
         write_timer_line(output, "finished");
     }
+    let mut failures = Vec::new();
     for command in build_action_commands(config) {
         if let Some(output) = output.as_deref_mut() {
             write_timer_line(output, &format!("run: {}", command.display()));
         }
-        run_command(&command, mode).with_context(|| format!("{} failed", command.label))?;
+        if let Err(err) = run_command(&command, mode) {
+            failures.push(format!("{} failed: {err}", command.label));
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "{} action(s) failed: {}",
+            failures.len(),
+            failures.join("; ")
+        );
     }
     Ok(())
 }
@@ -562,15 +580,18 @@ fn run_command(command: &ActionCommand, mode: RunMode) -> Result<()> {
 
 fn run_tui(path: PathBuf, config: Config) -> Result<()> {
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    let mut app = App::new(path, config);
-    let result = app.run(&mut terminal);
+    let result = (|| {
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+        let mut app = App::new(path, config);
+        let result = app.run(&mut terminal);
+        terminal.show_cursor().ok();
+        result
+    })();
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
-    terminal.show_cursor().ok();
+    execute!(io::stdout(), LeaveAlternateScreen).ok();
     result
 }
 
@@ -915,8 +936,10 @@ impl App {
     fn stop_timer(&mut self) {
         if let Some(timer) = self.timer.take() {
             timer.stop.store(true, Ordering::Relaxed);
+            self.apply_timer_result(timer.handle.join());
+        } else {
+            self.status = "timer stopped".to_string();
         }
-        self.status = "timer stopped".to_string();
     }
 
     fn reap_timer(&mut self) {
@@ -926,11 +949,18 @@ impl App {
             .is_some_and(|timer| timer.handle.is_finished())
         {
             let timer = self.timer.take().expect("timer exists");
-            match timer.handle.join() {
-                Ok(Ok(())) => self.status = "timer finished".to_string(),
-                Ok(Err(err)) => self.status = format!("timer failed: {err}"),
-                Err(_) => self.status = "timer failed: thread panicked".to_string(),
+            self.apply_timer_result(timer.handle.join());
+        }
+    }
+
+    fn apply_timer_result(&mut self, result: thread::Result<Result<()>>) {
+        match result {
+            Ok(Ok(())) => self.status = "timer finished".to_string(),
+            Ok(Err(err)) if err.to_string() == "timer stopped" => {
+                self.status = "timer stopped".to_string()
             }
+            Ok(Err(err)) => self.status = format!("timer failed: {err}"),
+            Err(_) => self.status = "timer failed: thread panicked".to_string(),
         }
     }
 
@@ -1295,6 +1325,41 @@ mod tests {
         assert!(text.contains("timer started: 10ms"));
         assert!(text.contains("remaining:"));
         assert!(text.contains("finished"));
+    }
+
+    #[test]
+    fn run_timer_attempts_all_actions_before_returning_failures() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut config = quiet_config("1ns");
+        config.actions.custom.enabled = true;
+        config.actions.custom.commands = vec!["false".to_string(), "true".to_string()];
+        let mut output = Vec::new();
+
+        let error = run_timer(&config, &stop, RunMode::Cli, Some(&mut output)).unwrap_err();
+
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("run: false"));
+        assert!(text.contains("run: true"));
+        assert!(error.to_string().contains("1 action(s) failed"));
+    }
+
+    #[test]
+    fn ensure_config_validates_loaded_config() {
+        let path = std::env::temp_dir().join(format!(
+            "gosleep-timer-invalid-{}-{}.yaml",
+            std::process::id(),
+            "power"
+        ));
+        fs::write(
+            &path,
+            "duration: 25m\nactions:\n  power:\n    mode: suspend\n",
+        )
+        .unwrap();
+
+        let error = ensure_config(&path).unwrap_err();
+        fs::remove_file(path).ok();
+
+        assert!(error.to_string().contains("invalid power mode"));
     }
 
     #[test]
