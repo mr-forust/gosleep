@@ -958,6 +958,10 @@ impl App {
             frame.render_widget(Paragraph::new("terminal too small"), area);
             return;
         }
+        if self.timer.is_some() {
+            self.draw_running(frame, area);
+            return;
+        }
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -981,6 +985,90 @@ impl App {
         frame.render_widget(
             Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
             chunks[2],
+        );
+    }
+
+    fn draw_running(&self, frame: &mut Frame, area: Rect) {
+        let (_, remaining, progress) = self.timer_snapshot();
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Length(7),
+                Constraint::Length(2),
+                Constraint::Min(4),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+        frame.render_widget(
+            Paragraph::new("gosleep-timer").style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            chunks[0],
+        );
+
+        let time_lines = ascii_time(&format_compact_duration(remaining))
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::Cyan))))
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(time_lines), chunks[1]);
+
+        frame.render_widget(
+            Gauge::default()
+                .gauge_style(Style::default().fg(Color::Magenta))
+                .label(format_gauge_label(progress))
+                .ratio(progress),
+            chunks[2],
+        );
+
+        let commands = build_action_commands(&self.config);
+        let lines = if commands.is_empty() {
+            vec![Line::from("no post-timer actions enabled")]
+        } else {
+            commands
+                .iter()
+                .flat_map(|command| {
+                    let style = if command.is_dangerous() {
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Green)
+                    };
+                    wrap_command(
+                        &command.display(),
+                        chunks[3].width.saturating_sub(4) as usize,
+                    )
+                    .into_iter()
+                    .map(move |line| Line::from(Span::styled(line, style)))
+                })
+                .collect::<Vec<_>>()
+        };
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .title(" commands after countdown ")
+                        .borders(Borders::ALL)
+                        .border_style(Color::Blue),
+                )
+                .wrap(Wrap { trim: false }),
+            chunks[3],
+        );
+
+        let footer = if self
+            .timer
+            .as_ref()
+            .is_some_and(|timer| timer.pause.load(Ordering::Relaxed))
+        {
+            "paused | p resume | x stop | q quit"
+        } else {
+            "running | p pause | x stop | q quit"
+        };
+        frame.render_widget(
+            Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
+            chunks[4],
         );
     }
 
@@ -1090,10 +1178,19 @@ impl App {
     }
 
     fn draw_preview(&self, frame: &mut Frame, area: Rect) {
-        let lines = preview_commands(&self.config)
-            .into_iter()
-            .flat_map(|command| wrap_command(&command, area.width.saturating_sub(4) as usize))
-            .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::Green))))
+        let commands = build_action_commands(&self.config);
+        let lines = commands
+            .iter()
+            .flat_map(|command| {
+                let style = if command.is_dangerous() {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Green)
+                };
+                wrap_command(&command.display(), area.width.saturating_sub(4) as usize)
+                    .into_iter()
+                    .map(move |line| Line::from(Span::styled(line, style)))
+            })
             .collect::<Vec<_>>();
         let lines = if lines.is_empty() {
             vec![Line::from("no post-timer actions enabled")]
@@ -1571,6 +1668,37 @@ fn format_time_left_text(timer: Option<&TimerState>, remaining: Duration, width:
 
 fn format_gauge_label(progress: f64) -> String {
     format!("{:>3}%", (progress * 100.0).round() as u16)
+}
+
+fn ascii_time(value: &str) -> Vec<String> {
+    let mut rows = vec![String::new(); 5];
+    for ch in value.chars() {
+        let glyph = ascii_glyph(ch);
+        for (row, part) in rows.iter_mut().zip(glyph) {
+            if !row.is_empty() {
+                row.push(' ');
+            }
+            row.push_str(part);
+        }
+    }
+    rows
+}
+
+fn ascii_glyph(ch: char) -> [&'static str; 5] {
+    match ch {
+        '0' => [" ### ", "#   #", "#   #", "#   #", " ### "],
+        '1' => ["  #  ", " ##  ", "  #  ", "  #  ", " ### "],
+        '2' => [" ### ", "#   #", "   # ", "  #  ", "#####"],
+        '3' => ["#### ", "    #", " ### ", "    #", "#### "],
+        '4' => ["#   #", "#   #", "#####", "    #", "    #"],
+        '5' => ["#####", "#    ", "#### ", "    #", "#### "],
+        '6' => [" ### ", "#    ", "#### ", "#   #", " ### "],
+        '7' => ["#####", "    #", "   # ", "  #  ", "  #  "],
+        '8' => [" ### ", "#   #", " ### ", "#   #", " ### "],
+        '9' => [" ### ", "#   #", " ####", "    #", " ### "],
+        ':' => ["     ", "  #  ", "     ", "  #  ", "     "],
+        _ => ["     ", "     ", "     ", "     ", "     "],
+    }
 }
 
 fn wrap_command(command: &str, width: usize) -> Vec<String> {
