@@ -993,35 +993,33 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Min(1),
+                Constraint::Length(9),
+                Constraint::Min(1),
                 Constraint::Length(2),
-                Constraint::Length(7),
-                Constraint::Length(2),
-                Constraint::Min(4),
+                Constraint::Length(8),
                 Constraint::Length(1),
             ])
             .split(area);
 
-        frame.render_widget(
-            Paragraph::new("gosleep-timer").style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            chunks[0],
-        );
-
         let time_lines = ascii_time(&format_compact_duration(remaining))
             .into_iter()
-            .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::Cyan))))
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White))))
             .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(time_lines), chunks[1]);
+        let time_width = time_lines
+            .iter()
+            .map(|line| line.width() as u16)
+            .max()
+            .unwrap_or(0);
+        let timer_area = center_rect(time_width.min(chunks[1].width), 7, chunks[1]);
+        frame.render_widget(Paragraph::new(time_lines), timer_area);
 
         frame.render_widget(
             Gauge::default()
                 .gauge_style(Style::default().fg(Color::Magenta))
                 .label(format_gauge_label(progress))
                 .ratio(progress),
-            chunks[2],
+            chunks[3],
         );
 
         let commands = build_action_commands(&self.config);
@@ -1038,7 +1036,7 @@ impl App {
                     };
                     wrap_command(
                         &command.display(),
-                        chunks[3].width.saturating_sub(4) as usize,
+                        chunks[4].width.saturating_sub(4) as usize,
                     )
                     .into_iter()
                     .map(move |line| Line::from(Span::styled(line, style)))
@@ -1054,7 +1052,7 @@ impl App {
                         .border_style(Color::Blue),
                 )
                 .wrap(Wrap { trim: false }),
-            chunks[3],
+            chunks[4],
         );
 
         let footer = if self
@@ -1068,7 +1066,7 @@ impl App {
         };
         frame.render_widget(
             Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
-            chunks[4],
+            chunks[5],
         );
     }
 
@@ -1671,7 +1669,7 @@ fn format_gauge_label(progress: f64) -> String {
 }
 
 fn ascii_time(value: &str) -> Vec<String> {
-    let mut rows = vec![String::new(); 5];
+    let mut rows = vec![String::new(); 7];
     for ch in value.chars() {
         let glyph = ascii_glyph(ch);
         for (row, part) in rows.iter_mut().zip(glyph) {
@@ -1684,20 +1682,127 @@ fn ascii_time(value: &str) -> Vec<String> {
     rows
 }
 
-fn ascii_glyph(ch: char) -> [&'static str; 5] {
+fn ascii_glyph(ch: char) -> [&'static str; 7] {
     match ch {
-        '0' => [" ### ", "#   #", "#   #", "#   #", " ### "],
-        '1' => ["  #  ", " ##  ", "  #  ", "  #  ", " ### "],
-        '2' => [" ### ", "#   #", "   # ", "  #  ", "#####"],
-        '3' => ["#### ", "    #", " ### ", "    #", "#### "],
-        '4' => ["#   #", "#   #", "#####", "    #", "    #"],
-        '5' => ["#####", "#    ", "#### ", "    #", "#### "],
-        '6' => [" ### ", "#    ", "#### ", "#   #", " ### "],
-        '7' => ["#####", "    #", "   # ", "  #  ", "  #  "],
-        '8' => [" ### ", "#   #", " ### ", "#   #", " ### "],
-        '9' => [" ### ", "#   #", " ####", "    #", " ### "],
-        ':' => ["     ", "  #  ", "     ", "  #  ", "     "],
-        _ => ["     ", "     ", "     ", "     ", "     "],
+        '0' => [
+            " ad8888ba ",
+            "d8\"    \"8b",
+            "8P      88",
+            "8b      d8",
+            "8b      d8",
+            "Y8a.  .a8P",
+            " \"Y8888Y\" ",
+        ],
+        '1' => [
+            "   88    ",
+            "  888    ",
+            "   88    ",
+            "   88    ",
+            "   88    ",
+            "   88    ",
+            " 888888  ",
+        ],
+        '2' => [
+            " ad8888ba ",
+            "d8\"    \"8b",
+            "      ,8P",
+            "    ,d8P ",
+            "  ,d8P'  ",
+            " d8P'    ",
+            "888888888",
+        ],
+        '3' => [
+            " ad8888ba ",
+            "d8\"    \"8b",
+            "      ,8P",
+            "   aad8\" ",
+            "      `8b",
+            "Y8a.  .a8P",
+            " \"Y8888Y\" ",
+        ],
+        '4' => [
+            "88     88",
+            "88     88",
+            "88     88",
+            "888888888",
+            "       88",
+            "       88",
+            "       88",
+        ],
+        '5' => [
+            "888888888",
+            "88       ",
+            "88       ",
+            "888888ba ",
+            "       8b",
+            "Y8a.  .a8P",
+            " \"Y8888Y\" ",
+        ],
+        '6' => [
+            " ad8888ba ",
+            "d8\"      ",
+            "88       ",
+            "88PPPPba ",
+            "88     8b",
+            "Y8a.  .a8P",
+            " \"Y8888Y\" ",
+        ],
+        '7' => [
+            "888888888",
+            "      ,8P",
+            "     ,8P ",
+            "    ,8P  ",
+            "   ,8P   ",
+            "  ,8P    ",
+            " ,8P     ",
+        ],
+        '8' => [
+            " ad8888ba ",
+            "d8\"    \"8b",
+            "Y8a.  .a8P",
+            "  Y8888P ",
+            "d8\"    \"8b",
+            "Y8a.  .a8P",
+            " \"Y8888Y\" ",
+        ],
+        '9' => [
+            " ad8888ba ",
+            "d8\"    \"8b",
+            "Y8a.  .a8P",
+            " \"Y888888",
+            "       88",
+            "Y8a.  .a8P",
+            " \"Y8888Y\" ",
+        ],
+        ':' => [
+            "         ",
+            "   88    ",
+            "   88    ",
+            "         ",
+            "   88    ",
+            "   88    ",
+            "         ",
+        ],
+        _ => [
+            "         ",
+            "         ",
+            "         ",
+            "         ",
+            "         ",
+            "         ",
+            "         ",
+        ],
+    }
+}
+
+fn center_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
     }
 }
 
