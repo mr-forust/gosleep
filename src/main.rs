@@ -351,7 +351,7 @@ fn ensure_config(path: &Path) -> Result<Config> {
         return Ok(config);
     }
     let data = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let mut config: Config = serde_yaml::from_str(&data).context("parse config")?;
+    let mut config: Config = noyalib::from_str(&data).context("parse config")?;
     normalize_config(&mut config);
     validate_config(&config)?;
     Ok(config)
@@ -364,7 +364,7 @@ fn save_config(path: &Path, config: &Config) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    let data = serde_yaml::to_string(&config).context("serialize config")?;
+    let data = noyalib::to_string(&config).context("serialize config")?;
     fs::write(path, data).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
@@ -385,7 +385,7 @@ fn read_history(path: &Path) -> Result<Vec<HistoryEntry>> {
         return Ok(Vec::new());
     }
     let data = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    serde_yaml::from_str(&data).with_context(|| format!("parse {}", path.display()))
+    noyalib::from_str(&data).with_context(|| format!("parse {}", path.display()))
 }
 
 fn append_history(path: &Path, entry: HistoryEntry) -> Result<()> {
@@ -394,7 +394,7 @@ fn append_history(path: &Path, entry: HistoryEntry) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    let data = serde_yaml::to_string(&entries).context("serialize history")?;
+    let data = noyalib::to_string(&entries).context("serialize history")?;
     fs::write(path, data).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
@@ -1229,10 +1229,10 @@ impl App {
         match key {
             KeyCode::Esc => self.edit = None,
             KeyCode::Enter => {
-                if let Some(edit) = self.edit.take() {
-                    if let Err(err) = self.apply_edit(edit.field, edit.value) {
-                        self.status = format!("edit failed: {err}");
-                    }
+                if let Some(edit) = self.edit.take()
+                    && let Err(err) = self.apply_edit(edit.field, edit.value)
+                {
+                    self.status = format!("edit failed: {err}");
                 }
             }
             KeyCode::Backspace => {
