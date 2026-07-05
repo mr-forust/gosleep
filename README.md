@@ -60,6 +60,24 @@ Preview commands that will run after the countdown:
 gosleep-timer preview
 ```
 
+Show the current config, enabled actions, and dangerous-action markers:
+
+```bash
+gosleep-timer status
+```
+
+Validate the config without starting the timer:
+
+```bash
+gosleep-timer validate
+```
+
+Open the config in `$VISUAL`, `$EDITOR`, or `vi`:
+
+```bash
+gosleep-timer edit
+```
+
 Run the saved timer config:
 
 ```bash
@@ -71,6 +89,20 @@ Override the duration for one run:
 ```bash
 gosleep-timer run 45m
 gosleep-timer run 1h30m
+```
+
+Run the countdown without executing post-timer actions:
+
+```bash
+gosleep-timer run --dry-run 10s
+gosleep-timer run --no-actions 10s
+```
+
+Inspect recorded sessions and aggregate stats:
+
+```bash
+gosleep-timer history
+gosleep-timer stats
 ```
 
 Use a custom config path:
@@ -89,6 +121,7 @@ gosleep-timer --config ./config.yaml preview
 | `Enter` while editing | Apply edit |
 | `Esc` while editing | Cancel edit |
 | `r` | Start/restart timer |
+| `p` | Pause/resume running timer |
 | `x` | Stop timer |
 | `s` | Save config |
 | `q` / `Esc` | Quit |
@@ -154,6 +187,12 @@ Other actions use common Linux desktop tools:
 - `systemctl`
 
 Install only the tools needed for the actions you enable.
+Dangerous actions such as `pkill`, power actions, and common destructive custom commands are highlighted in red in the TUI preview.
+
+## History
+
+Completed timer sessions are appended to `history.yaml` next to the active config file.
+If no poweroff or reboot action is configured, CLI `run` asks for wake confirmation after the timer finishes and records the elapsed sleep time.
 
 ## Development
 

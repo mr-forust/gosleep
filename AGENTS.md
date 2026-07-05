@@ -46,10 +46,12 @@ Use a temporary config path so local tests do not mutate the user's real config:
 ```bash
 tmpdir="$(mktemp -d)"
 cargo run -- --config "$tmpdir/config.yaml" init
+cargo run -- --config "$tmpdir/config.yaml" validate
+cargo run -- --config "$tmpdir/config.yaml" status
 cargo run -- --config "$tmpdir/config.yaml" preview
 ```
 
-For `run` smoke tests, disable actions first so the command does not call `playerctl`, `systemctl`, `pkill`, workspace tools, or custom shell commands.
+For `run` smoke tests, pass `--no-actions` or disable actions first so the command does not call `playerctl`, `systemctl`, `pkill`, workspace tools, or custom shell commands.
 
 ## Versioning
 
