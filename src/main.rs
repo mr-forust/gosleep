@@ -657,7 +657,8 @@ impl App {
                             self.focus = self.focus.saturating_sub(1)
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            self.focus = (self.focus + 1).min(FIELDS.len() - 1);
+                            let last = self.visible_fields().len().saturating_sub(1);
+                            self.focus = (self.focus + 1).min(last);
                         }
                         KeyCode::Char(' ') | KeyCode::Enter => self.activate()?,
                         KeyCode::Char('s') => self.save(),
@@ -768,8 +769,10 @@ impl App {
     }
 
     fn draw_fields(&mut self, frame: &mut Frame, area: Rect) {
+        let fields = self.visible_fields();
         let visible = area.height.saturating_sub(2) as usize;
-        self.offset = self.offset.min(FIELDS.len().saturating_sub(visible));
+        self.focus = self.focus.min(fields.len().saturating_sub(1));
+        self.offset = self.offset.min(fields.len().saturating_sub(visible));
         if self.focus < self.offset {
             self.offset = self.focus;
         }
@@ -777,7 +780,7 @@ impl App {
             self.offset = self.focus.saturating_sub(visible.saturating_sub(1));
         }
 
-        let items = FIELDS
+        let items = fields
             .iter()
             .enumerate()
             .skip(self.offset)
@@ -830,11 +833,13 @@ impl App {
     }
 
     fn activate(&mut self) -> Result<()> {
-        match FIELDS[self.focus].kind {
-            FieldKind::Bool => self.toggle_bool(FIELDS[self.focus].key),
-            FieldKind::Cycle(options) => self.cycle(FIELDS[self.focus].key, options),
+        let Some(field) = self.focused_field() else {
+            return Ok(());
+        };
+        match field.kind {
+            FieldKind::Bool => self.toggle_bool(field.key),
+            FieldKind::Cycle(options) => self.cycle(field.key, options),
             FieldKind::Edit | FieldKind::Int | FieldKind::Csv | FieldKind::Semi => {
-                let field = FIELDS[self.focus];
                 self.edit = Some(EditState {
                     field,
                     value: self.field_value(&field),
@@ -1035,6 +1040,14 @@ impl App {
             .unwrap_or(0);
         *current = options[(index + 1) % options.len()].to_string();
     }
+
+    fn visible_fields(&self) -> Vec<&'static Field> {
+        visible_fields(&self.config)
+    }
+
+    fn focused_field(&self) -> Option<Field> {
+        self.visible_fields().get(self.focus).map(|field| **field)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1054,7 +1067,7 @@ enum FieldKind {
     Semi,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FieldKey {
     Duration,
     WorkspaceEnabled,
@@ -1156,6 +1169,33 @@ const FIELDS: &[Field] = &[
         kind: FieldKind::Semi,
     },
 ];
+
+fn visible_fields(config: &Config) -> Vec<&'static Field> {
+    FIELDS
+        .iter()
+        .filter(|field| field_visible(config, field.key))
+        .collect()
+}
+
+fn field_visible(config: &Config, key: FieldKey) -> bool {
+    match key {
+        FieldKey::WorkspaceBackend | FieldKey::WorkspaceNumber => config.actions.workspace.enabled,
+        FieldKey::MediaAction => config.actions.media.enabled,
+        FieldKey::BrightnessValue => config.actions.brightness.enabled,
+        FieldKey::LockCommand => config.actions.lock.enabled,
+        FieldKey::KillProcesses => config.actions.kill.enabled,
+        FieldKey::CustomCommands => config.actions.custom.enabled,
+        FieldKey::Duration
+        | FieldKey::WorkspaceEnabled
+        | FieldKey::MediaEnabled
+        | FieldKey::BrightnessEnabled
+        | FieldKey::MuteEnabled
+        | FieldKey::LockEnabled
+        | FieldKey::KillEnabled
+        | FieldKey::PowerMode
+        | FieldKey::CustomEnabled => true,
+    }
+}
 
 fn on_off(value: bool) -> String {
     if value { "on" } else { "off" }.to_string()
@@ -1386,6 +1426,45 @@ mod tests {
         assert_eq!(format_gauge_label(0.0), "  0%");
         assert_eq!(format_gauge_label(0.58), " 58%");
         assert_eq!(format_gauge_label(1.0), "100%");
+    }
+
+    #[test]
+    fn visible_fields_hide_disabled_action_settings() {
+        let mut config = quiet_config("25m");
+
+        let keys = visible_field_keys(&config);
+        assert!(keys.contains(&FieldKey::Duration));
+        assert!(keys.contains(&FieldKey::MediaEnabled));
+        assert!(!keys.contains(&FieldKey::MediaAction));
+        assert!(!keys.contains(&FieldKey::WorkspaceBackend));
+        assert!(!keys.contains(&FieldKey::WorkspaceNumber));
+        assert!(!keys.contains(&FieldKey::BrightnessValue));
+        assert!(!keys.contains(&FieldKey::LockCommand));
+        assert!(!keys.contains(&FieldKey::KillProcesses));
+        assert!(!keys.contains(&FieldKey::CustomCommands));
+
+        config.actions.media.enabled = true;
+        config.actions.workspace.enabled = true;
+        config.actions.brightness.enabled = true;
+        config.actions.lock.enabled = true;
+        config.actions.kill.enabled = true;
+        config.actions.custom.enabled = true;
+
+        let keys = visible_field_keys(&config);
+        assert!(keys.contains(&FieldKey::MediaAction));
+        assert!(keys.contains(&FieldKey::WorkspaceBackend));
+        assert!(keys.contains(&FieldKey::WorkspaceNumber));
+        assert!(keys.contains(&FieldKey::BrightnessValue));
+        assert!(keys.contains(&FieldKey::LockCommand));
+        assert!(keys.contains(&FieldKey::KillProcesses));
+        assert!(keys.contains(&FieldKey::CustomCommands));
+    }
+
+    fn visible_field_keys(config: &Config) -> Vec<FieldKey> {
+        visible_fields(config)
+            .into_iter()
+            .map(|field| field.key)
+            .collect()
     }
 
     fn dummy_timer_state() -> TimerState {
