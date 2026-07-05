@@ -1,14 +1,14 @@
 use std::{
     fs,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -42,7 +42,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Run { duration: Option<String> },
+    Run {
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        no_actions: bool,
+        duration: Option<String>,
+    },
+    Status,
+    Validate,
+    Edit,
+    History,
+    Stats,
     Preview,
     Init,
 }
@@ -129,6 +140,34 @@ struct ActionCommand {
     shell: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HistoryEntry {
+    started_at: u64,
+    duration_seconds: u64,
+    slept_seconds: Option<u64>,
+    status: String,
+    actions: Vec<String>,
+    failures: Vec<String>,
+    dry_run: bool,
+    no_actions: bool,
+}
+
+#[derive(Debug, Clone)]
+struct TimerReport {
+    started_at: u64,
+    duration: Duration,
+    actions: Vec<String>,
+    failures: Vec<String>,
+    dry_run: bool,
+    no_actions: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TimerOptions {
+    dry_run: bool,
+    no_actions: bool,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -187,6 +226,44 @@ impl ActionCommand {
     fn display(&self) -> String {
         self.shell.clone().unwrap_or_else(|| self.args.join(" "))
     }
+
+    fn is_dangerous(&self) -> bool {
+        if matches!(self.label, "kill" | "power") {
+            return true;
+        }
+        let command = self.display().to_lowercase();
+        [
+            "rm -rf",
+            "mkfs",
+            "dd if=",
+            "shutdown",
+            "reboot",
+            "poweroff",
+            "systemctl poweroff",
+            "systemctl reboot",
+            "wipefs",
+            "shred",
+            "killall",
+            "pkill",
+        ]
+        .iter()
+        .any(|needle| command.contains(needle))
+    }
+}
+
+impl TimerReport {
+    fn to_history(&self, status: &str, slept_seconds: Option<u64>) -> HistoryEntry {
+        HistoryEntry {
+            started_at: self.started_at,
+            duration_seconds: self.duration.as_secs(),
+            slept_seconds,
+            status: status.to_string(),
+            actions: self.actions.clone(),
+            failures: self.failures.clone(),
+            dry_run: self.dry_run,
+            no_actions: self.no_actions,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -195,17 +272,51 @@ fn main() -> Result<()> {
     let mut config = ensure_config(&path)?;
 
     match cli.command {
-        Some(Commands::Run { duration }) => {
+        Some(Commands::Run {
+            dry_run,
+            no_actions,
+            duration,
+        }) => {
             if let Some(duration) = duration {
                 config.duration = duration;
             }
             let mut stdout = io::stdout();
-            run_timer(
+            let options = TimerOptions {
+                dry_run,
+                no_actions,
+            };
+            let report = run_timer(
                 &config,
                 &Arc::new(AtomicBool::new(false)),
+                &Arc::new(AtomicBool::new(false)),
+                &Arc::new(AtomicU64::new(0)),
                 RunMode::Cli,
+                options,
                 Some(&mut stdout),
+            )?;
+            let slept_seconds = prompt_wake_confirmation(&config, options)?;
+            append_history(
+                &history_path(&path),
+                report.to_history("finished", slept_seconds),
             )
+        }
+        Some(Commands::Status) => {
+            print_status(&path, &config);
+            Ok(())
+        }
+        Some(Commands::Validate) => {
+            validate_config(&config)?;
+            println!("valid {}", path.display());
+            Ok(())
+        }
+        Some(Commands::Edit) => edit_config(&path),
+        Some(Commands::History) => {
+            print_history(&history_path(&path))?;
+            Ok(())
+        }
+        Some(Commands::Stats) => {
+            print_stats(&history_path(&path))?;
+            Ok(())
         }
         Some(Commands::Preview) => {
             for command in preview_commands(&config) {
@@ -233,7 +344,7 @@ fn default_config_path() -> PathBuf {
         .join("config.yaml")
 }
 
-fn ensure_config(path: &PathBuf) -> Result<Config> {
+fn ensure_config(path: &Path) -> Result<Config> {
     if !path.exists() {
         let config = Config::default();
         save_config(path, &config)?;
@@ -246,7 +357,7 @@ fn ensure_config(path: &PathBuf) -> Result<Config> {
     Ok(config)
 }
 
-fn save_config(path: &PathBuf, config: &Config) -> Result<()> {
+fn save_config(path: &Path, config: &Config) -> Result<()> {
     let mut config = config.clone();
     normalize_config(&mut config);
     validate_config(&config)?;
@@ -256,6 +367,131 @@ fn save_config(path: &PathBuf, config: &Config) -> Result<()> {
     let data = serde_yaml::to_string(&config).context("serialize config")?;
     fs::write(path, data).with_context(|| format!("write {}", path.display()))?;
     Ok(())
+}
+
+fn history_path(config_path: &Path) -> PathBuf {
+    config_path.with_file_name("history.yaml")
+}
+
+fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn read_history(path: &Path) -> Result<Vec<HistoryEntry>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let data = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    serde_yaml::from_str(&data).with_context(|| format!("parse {}", path.display()))
+}
+
+fn append_history(path: &Path, entry: HistoryEntry) -> Result<()> {
+    let mut entries = read_history(path)?;
+    entries.push(entry);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let data = serde_yaml::to_string(&entries).context("serialize history")?;
+    fs::write(path, data).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+fn print_status(path: &Path, config: &Config) {
+    println!("config: {}", path.display());
+    println!("history: {}", history_path(path).display());
+    println!("duration: {}", config.duration);
+    println!("actions:");
+    let commands = build_action_commands(config);
+    if commands.is_empty() {
+        println!("  none");
+    } else {
+        for command in commands {
+            let danger = if command.is_dangerous() { " !" } else { "" };
+            println!("  - [{}{}] {}", command.label, danger, command.display());
+        }
+    }
+}
+
+fn print_history(path: &Path) -> Result<()> {
+    let entries = read_history(path)?;
+    if entries.is_empty() {
+        println!("no history");
+        return Ok(());
+    }
+    for entry in entries.iter().rev().take(20) {
+        let slept = entry
+            .slept_seconds
+            .map(|seconds| format!(" slept={}", format_duration(Duration::from_secs(seconds))))
+            .unwrap_or_default();
+        println!(
+            "{} status={} duration={} actions={} failures={}{}",
+            entry.started_at,
+            entry.status,
+            format_duration(Duration::from_secs(entry.duration_seconds)),
+            entry.actions.len(),
+            entry.failures.len(),
+            slept
+        );
+    }
+    Ok(())
+}
+
+fn print_stats(path: &Path) -> Result<()> {
+    let entries = read_history(path)?;
+    let finished = entries
+        .iter()
+        .filter(|entry| entry.status == "finished")
+        .count();
+    let total_duration: u64 = entries.iter().map(|entry| entry.duration_seconds).sum();
+    let total_slept: u64 = entries.iter().filter_map(|entry| entry.slept_seconds).sum();
+    let failures: usize = entries.iter().map(|entry| entry.failures.len()).sum();
+    println!("sessions: {}", entries.len());
+    println!("finished: {finished}");
+    println!(
+        "scheduled: {}",
+        format_duration(Duration::from_secs(total_duration))
+    );
+    println!(
+        "slept: {}",
+        format_duration(Duration::from_secs(total_slept))
+    );
+    println!("action failures: {failures}");
+    Ok(())
+}
+
+fn edit_config(path: &Path) -> Result<()> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let status = Command::new(editor)
+        .arg(path)
+        .status()
+        .context("open editor")?;
+    if !status.success() {
+        bail!("editor exited with {status}");
+    }
+    let _ = ensure_config(path)?;
+    Ok(())
+}
+
+fn prompt_wake_confirmation(config: &Config, options: TimerOptions) -> Result<Option<u64>> {
+    if options.dry_run
+        || options.no_actions
+        || matches!(config.actions.power.mode.as_str(), "poweroff" | "reboot")
+    {
+        return Ok(None);
+    }
+    print!("timer finished. Press Enter when awake to record sleep time...");
+    io::stdout().flush().ok();
+    let started = Instant::now();
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .context("read wake confirmation")?;
+    Ok(Some(started.elapsed().as_secs()))
 }
 
 fn normalize_config(config: &mut Config) {
@@ -492,12 +728,22 @@ fn write_timer_progress(output: &mut dyn Write, message: &str) {
 fn run_timer(
     config: &Config,
     stop: &Arc<AtomicBool>,
+    pause: &Arc<AtomicBool>,
+    remaining_ms: &Arc<AtomicU64>,
     mode: RunMode,
+    options: TimerOptions,
     mut output: Option<&mut dyn Write>,
-) -> Result<()> {
+) -> Result<TimerReport> {
     validate_config(config)?;
     let duration = parse_duration(&config.duration)?;
+    let started_at = unix_timestamp();
     let started = Instant::now();
+    let mut remaining = duration;
+    let mut last_tick = started;
+    remaining_ms.store(
+        duration.as_millis().min(u128::from(u64::MAX)) as u64,
+        Ordering::Relaxed,
+    );
     if let Some(output) = output.as_deref_mut() {
         write_timer_line(output, &format!("timer started: {}", config.duration));
     }
@@ -509,18 +755,34 @@ fn run_timer(
             }
             bail!("timer stopped");
         }
-        let elapsed = started.elapsed();
-        if elapsed >= duration {
+
+        if pause.load(Ordering::Relaxed) {
+            last_tick = Instant::now();
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        }
+
+        let now = Instant::now();
+        let elapsed = now.saturating_duration_since(last_tick);
+        last_tick = now;
+        remaining = remaining.saturating_sub(elapsed);
+        remaining_ms.store(
+            remaining.as_millis().min(u128::from(u64::MAX)) as u64,
+            Ordering::Relaxed,
+        );
+
+        if remaining.is_zero() {
             break;
         }
         if let Some(output) = output.as_deref_mut() {
             write_timer_progress(
                 output,
-                &format!("remaining: {}", format_duration(duration - elapsed)),
+                &format!("remaining: {}", format_duration(remaining)),
             );
         }
         thread::sleep(Duration::from_millis(250));
     }
+    remaining_ms.store(0, Ordering::Relaxed);
 
     if stop.load(Ordering::Relaxed) {
         if let Some(output) = output.as_deref_mut() {
@@ -533,14 +795,31 @@ fn run_timer(
         write_timer_line(output, "finished");
     }
     let mut failures = Vec::new();
-    for command in build_action_commands(config) {
+    let actions = if options.no_actions {
+        Vec::new()
+    } else {
+        build_action_commands(config)
+    };
+    for command in &actions {
         if let Some(output) = output.as_deref_mut() {
-            write_timer_line(output, &format!("run: {}", command.display()));
+            let prefix = if options.dry_run { "would run" } else { "run" };
+            write_timer_line(output, &format!("{prefix}: {}", command.display()));
         }
-        if let Err(err) = run_command(&command, mode) {
+        if options.dry_run {
+            continue;
+        }
+        if let Err(err) = run_command(command, mode) {
             failures.push(format!("{} failed: {err}", command.label));
         }
     }
+    let report = TimerReport {
+        started_at,
+        duration,
+        actions: actions.iter().map(ActionCommand::display).collect(),
+        failures: failures.clone(),
+        dry_run: options.dry_run,
+        no_actions: options.no_actions,
+    };
     if !failures.is_empty() {
         bail!(
             "{} action(s) failed: {}",
@@ -548,7 +827,7 @@ fn run_timer(
             failures.join("; ")
         );
     }
-    Ok(())
+    Ok(report)
 }
 
 fn prepare_command_stdio(process: &mut Command, mode: RunMode) {
@@ -606,10 +885,11 @@ struct App {
 }
 
 struct TimerState {
-    started: Instant,
     duration: Duration,
     stop: Arc<AtomicBool>,
-    handle: thread::JoinHandle<Result<()>>,
+    pause: Arc<AtomicBool>,
+    remaining_ms: Arc<AtomicU64>,
+    handle: thread::JoinHandle<Result<TimerReport>>,
 }
 
 struct EditState {
@@ -663,6 +943,7 @@ impl App {
                         KeyCode::Char(' ') | KeyCode::Enter => self.activate()?,
                         KeyCode::Char('s') => self.save(),
                         KeyCode::Char('r') => self.start_timer(),
+                        KeyCode::Char('p') => self.toggle_pause(),
                         KeyCode::Char('x') => self.stop_timer(),
                         _ => {}
                     }
@@ -695,7 +976,7 @@ impl App {
                 edit.field.label, edit.value
             )
         } else {
-            "space/enter edit-toggle | r run | x stop | s save | q quit".to_string()
+            "space/enter edit-toggle | r run | p pause | x stop | s save | q quit".to_string()
         };
         frame.render_widget(
             Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
@@ -926,16 +1207,46 @@ impl App {
             }
         };
         let stop = Arc::new(AtomicBool::new(false));
+        let pause = Arc::new(AtomicBool::new(false));
+        let remaining_ms = Arc::new(AtomicU64::new(
+            duration.as_millis().min(u128::from(u64::MAX)) as u64,
+        ));
         let thread_stop = Arc::clone(&stop);
+        let thread_pause = Arc::clone(&pause);
+        let thread_remaining_ms = Arc::clone(&remaining_ms);
         let config = self.config.clone();
-        let handle = thread::spawn(move || run_timer(&config, &thread_stop, RunMode::Tui, None));
+        let handle = thread::spawn(move || {
+            run_timer(
+                &config,
+                &thread_stop,
+                &thread_pause,
+                &thread_remaining_ms,
+                RunMode::Tui,
+                TimerOptions::default(),
+                None,
+            )
+        });
         self.timer = Some(TimerState {
-            started: Instant::now(),
             duration,
             stop,
+            pause,
+            remaining_ms,
             handle,
         });
         self.status = "timer running".to_string();
+    }
+
+    fn toggle_pause(&mut self) {
+        let Some(timer) = &self.timer else {
+            return;
+        };
+        let paused = !timer.pause.load(Ordering::Relaxed);
+        timer.pause.store(paused, Ordering::Relaxed);
+        self.status = if paused {
+            "timer paused".to_string()
+        } else {
+            "timer running".to_string()
+        };
     }
 
     fn stop_timer(&mut self) {
@@ -958,9 +1269,18 @@ impl App {
         }
     }
 
-    fn apply_timer_result(&mut self, result: thread::Result<Result<()>>) {
+    fn apply_timer_result(&mut self, result: thread::Result<Result<TimerReport>>) {
         match result {
-            Ok(Ok(())) => self.status = "timer finished".to_string(),
+            Ok(Ok(report)) => {
+                if let Err(err) = append_history(
+                    &history_path(&self.path),
+                    report.to_history("finished", None),
+                ) {
+                    self.status = format!("history failed: {err}");
+                } else {
+                    self.status = "timer finished".to_string();
+                }
+            }
             Ok(Err(err)) if err.to_string() == "timer stopped" => {
                 self.status = "timer stopped".to_string()
             }
@@ -973,9 +1293,13 @@ impl App {
         let Some(timer) = &self.timer else {
             return (Duration::ZERO, Duration::ZERO, 0.0);
         };
-        let elapsed = timer.started.elapsed().min(timer.duration);
-        let remaining = timer.duration.saturating_sub(elapsed);
-        let progress = elapsed.as_secs_f64() / timer.duration.as_secs_f64();
+        let remaining = Duration::from_millis(timer.remaining_ms.load(Ordering::Relaxed));
+        let elapsed = timer.duration.saturating_sub(remaining).min(timer.duration);
+        let progress = if timer.duration.is_zero() {
+            0.0
+        } else {
+            elapsed.as_secs_f64() / timer.duration.as_secs_f64()
+        };
         (elapsed, remaining, progress.clamp(0.0, 1.0))
     }
 
@@ -1350,7 +1674,16 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let config = quiet_config("1ns");
 
-        run_timer(&config, &stop, RunMode::Tui, None).unwrap();
+        run_timer(
+            &config,
+            &stop,
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicU64::new(0)),
+            RunMode::Tui,
+            TimerOptions::default(),
+            None,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1359,7 +1692,16 @@ mod tests {
         let config = quiet_config("10ms");
         let mut output = Vec::new();
 
-        run_timer(&config, &stop, RunMode::Cli, Some(&mut output)).unwrap();
+        run_timer(
+            &config,
+            &stop,
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicU64::new(0)),
+            RunMode::Cli,
+            TimerOptions::default(),
+            Some(&mut output),
+        )
+        .unwrap();
 
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("timer started: 10ms"));
@@ -1375,7 +1717,16 @@ mod tests {
         config.actions.custom.commands = vec!["false".to_string(), "true".to_string()];
         let mut output = Vec::new();
 
-        let error = run_timer(&config, &stop, RunMode::Cli, Some(&mut output)).unwrap_err();
+        let error = run_timer(
+            &config,
+            &stop,
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicU64::new(0)),
+            RunMode::Cli,
+            TimerOptions::default(),
+            Some(&mut output),
+        )
+        .unwrap_err();
 
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("run: false"));
@@ -1469,11 +1820,21 @@ mod tests {
 
     fn dummy_timer_state() -> TimerState {
         let stop = Arc::new(AtomicBool::new(false));
-        let handle = thread::spawn(|| Ok(()));
+        let handle = thread::spawn(|| {
+            Ok(TimerReport {
+                started_at: 0,
+                duration: Duration::from_secs(1),
+                actions: Vec::new(),
+                failures: Vec::new(),
+                dry_run: false,
+                no_actions: false,
+            })
+        });
         TimerState {
-            started: Instant::now(),
             duration: Duration::from_secs(1),
             stop,
+            pause: Arc::new(AtomicBool::new(false)),
+            remaining_ms: Arc::new(AtomicU64::new(1000)),
             handle,
         }
     }
