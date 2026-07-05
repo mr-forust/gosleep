@@ -73,20 +73,21 @@ test "$(cat VERSION)" = "$(cargo metadata --no-deps --format-version 1 | jq -r '
 Release workflow is tag-based:
 
 ```bash
-git tag -a v1.1.1 -m "gosleep-timer v1.1.1"
+git tag -a vMAJOR.MINOR.PATCH -m "gosleep-timer vMAJOR.MINOR.PATCH"
 git push origin main
-git push origin v1.1.1
+git push origin vMAJOR.MINOR.PATCH
 ```
 
 The Gitea release workflow:
 
+- runs formatting, tests, clippy, and YAML lint before building
 - builds `target/release/gosleep-timer`
-- creates `gosleep-timer-<version>-linux-amd64.tar.gz`
+- copies `gosleep-timer-<version>-linux-amd64`
 - writes a `.sha256`
 - creates or reuses the matching Gitea release
 - replaces release assets with matching names
 
-The workflow uses the built-in `GITEA_TOKEN` and declares `permissions: contents: write`.
+The workflow exposes `${{ secrets.GITEA_TOKEN }}` as `GITEA_TOKEN` and declares `permissions: contents: write`.
 
 ## Git Remote
 

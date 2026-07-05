@@ -36,7 +36,6 @@ https://gitea.forust.xyz/forust/gosleep.git
    - `clippy`
    - `curl`
    - `jq`
-   - `tar`
    - `sha256sum`
    - Docker, if using the YAML lint job as written
 4. Confirm Actions job token permissions allow `contents: write`.
@@ -44,10 +43,10 @@ https://gitea.forust.xyz/forust/gosleep.git
 
 ## Version Bump Checklist
 
-For a patch bump, for example `1.1.1` to `1.1.2`:
+For a patch bump, for example `1.1.3` to `1.1.4`:
 
 ```bash
-version=1.1.2
+version=1.1.4
 ```
 
 Update:
@@ -70,10 +69,10 @@ cargo build --release --locked
 
 ```bash
 git status --short
-git commit -am "chore: release v1.1.2"
-git tag -a v1.1.2 -m "gosleep-timer v1.1.2"
+git commit -am "chore: release v${version}"
+git tag -a "v${version}" -m "gosleep-timer v${version}"
 git push origin main
-git push origin v1.1.2
+git push origin "v${version}"
 ```
 
 The `.gitea/workflows/release.yaml` workflow will:
@@ -98,5 +97,6 @@ cargo build --release --locked
 mkdir -p dist
 binary="gosleep-timer-${version}-linux-amd64"
 cp target/release/gosleep-timer "dist/${binary}"
-sha256sum "dist/${binary}" > "dist/${binary}.sha256"
+cd dist
+sha256sum "${binary}" > "${binary}.sha256"
 ```

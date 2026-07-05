@@ -33,11 +33,11 @@ install -Dm755 target/release/gosleep-timer ~/.local/bin/gosleep-timer
 
 ### From release artifact
 
-Download `gosleep-timer-<version>-linux-amd64.tar.gz` from the Gitea release page, then:
+Download `gosleep-timer-<version>-linux-amd64` and its `.sha256` from the Gitea release page, then:
 
 ```bash
-tar -xzf gosleep-timer-<version>-linux-amd64.tar.gz
-install -Dm755 gosleep-timer ~/.local/bin/gosleep-timer
+sha256sum -c gosleep-timer-<version>-linux-amd64.sha256
+install -Dm755 gosleep-timer-<version>-linux-amd64 ~/.local/bin/gosleep-timer
 ```
 
 ## Usage
@@ -197,12 +197,11 @@ Required runner tools:
 - Rust stable toolchain with `cargo`, `rustfmt`, and `clippy`
 - `curl`
 - `jq`
-- `tar`
 - `sha256sum`
 
 Release authentication:
 
-- The workflow uses Gitea Actions' built-in `GITEA_TOKEN`.
+- The workflow exposes Gitea Actions' built-in `${{ secrets.GITEA_TOKEN }}` as `GITEA_TOKEN`.
 - The workflow declares `permissions: contents: write` so the token can create releases and upload assets.
 
 See [RELEASING.md](RELEASING.md) for the full release checklist.
