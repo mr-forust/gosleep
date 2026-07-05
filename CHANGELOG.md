@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 
 The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`.
 
+## [1.2.0] - 2026-07-05
+
+### Added
+
+- Added `status`, `validate`, `edit`, `history`, and `stats` CLI commands.
+- Added `run --dry-run` and `run --no-actions` for safer timer verification.
+- Added TUI pause/resume support and a fullscreen running timer view with large ASCII time-left display.
+- Added history recording for completed sessions and aggregate sleep/timer statistics.
+- Added red highlighting for dangerous post-timer actions and common destructive custom commands.
+
+### Changed
+
+- TUI settings now hide dependent options when their parent action is disabled.
+- Release assets are published as a raw Linux binary plus `.sha256` instead of a tar archive.
+
 ## [1.1.3] - 2026-07-03
 
 ### Fixed
@@ -27,6 +42,7 @@ The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`
 - Added YAML configuration, CLI `init`, `preview`, and `run` commands.
 - Added Gitea CI and tag-based release workflows.
 
+[1.2.0]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.2.0
 [1.1.3]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.1.3
 [1.1.2]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.1.2
 [1.1.1]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.1.1
