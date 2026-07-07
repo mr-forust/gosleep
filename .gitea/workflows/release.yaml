@@ -3,7 +3,7 @@ name: release
 "on":
   push:
     tags:
-      - "v*.*.*"
+      - "v[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
 
 permissions:
@@ -69,7 +69,7 @@ jobs:
           release_url="https://gitea.forust.xyz/api/v1/repos/forust/gosleep/releases"
           existing="$(curl -fsS \
             "${release_url}/tags/${tag}" \
-            -H "Authorization: token ${GITEA_TOKEN}" || true)"
+            -H "Authorization: token ${GITEA_TOKEN}")" || existing='{}'
           release_id="$(printf '%s' "$existing" | jq -r '.id // empty')"
 
           if [ -z "$release_id" ]; then
@@ -112,14 +112,15 @@ jobs:
                 -X DELETE "${release_url}/${release_id}/assets/${asset_id}" \
                 -H "Authorization: token ${GITEA_TOKEN}"
             fi
+            encoded="$(printf '%s' "$name" | jq -sRr @uri)"
             curl -fsS \
-              -X POST "${release_url}/${release_id}/assets?name=${name}" \
+              -X POST "${release_url}/${release_id}/assets?name=${encoded}" \
               -H "Authorization: token ${GITEA_TOKEN}" \
               -F "attachment=@${asset}"
           done
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: gosleep-timer-linux-amd64
           path: dist/*

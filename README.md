@@ -15,7 +15,7 @@ Rust TUI sleep timer for Linux desktop actions.
 - Single Rust binary, independent of Python.
 - Ratatui/Crossterm terminal UI.
 - YAML config at `~/.config/gosleep-timer/config.yaml` or `$XDG_CONFIG_HOME/gosleep-timer/config.yaml`.
-- CLI commands for initialization, preview, and direct timer runs.
+- CLI commands for init, status, validate, edit, preview, run, history, and stats.
 - Time-left display and progress bar.
 - Wrapped command preview for smaller terminals.
 - Linux desktop action support for niri, Hyprland, KDE, playerctl, brightnessctl/light, PipeWire/PulseAudio, systemd, and custom shell commands.
@@ -224,7 +224,8 @@ Release tags must match the package version:
 
 ```bash
 git tag -a vMAJOR.MINOR.PATCH -m "gosleep-timer vMAJOR.MINOR.PATCH"
-git push origin main --tags
+git push origin main
+git push origin vMAJOR.MINOR.PATCH
 ```
 
 ## Releases

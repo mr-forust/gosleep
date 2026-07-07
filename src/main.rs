@@ -12,6 +12,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+
+const TIMER_STOPPED_MSG: &str = "timer stopped";
 use clap::{Parser, Subcommand};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -295,10 +297,23 @@ fn main() -> Result<()> {
                 Some(&mut stdout),
             )?;
             let slept_seconds = prompt_wake_confirmation(&config, options)?;
+            let status = if report.failures.is_empty() {
+                "finished"
+            } else {
+                "partial"
+            };
             append_history(
                 &history_path(&path),
-                report.to_history("finished", slept_seconds),
-            )
+                report.to_history(status, slept_seconds),
+            )?;
+            if !report.failures.is_empty() {
+                bail!(
+                    "{} action(s) failed: {}",
+                    report.failures.len(),
+                    report.failures.join("; ")
+                );
+            }
+            Ok(())
         }
         Some(Commands::Status) => {
             print_status(&path, &config);
@@ -466,10 +481,12 @@ fn edit_config(path: &Path) -> Result<()> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_string());
-    let status = Command::new(editor)
-        .arg(path)
-        .status()
-        .context("open editor")?;
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().context("empty editor command")?;
+    let mut cmd = Command::new(program);
+    cmd.args(parts);
+    cmd.arg(path);
+    let status = cmd.status().context("open editor")?;
     if !status.success() {
         bail!("editor exited with {status}");
     }
@@ -716,13 +733,13 @@ enum RunMode {
     Tui,
 }
 
-fn write_timer_line(output: &mut dyn Write, message: &str) {
-    writeln!(output, "{message}").ok();
+fn write_timer_line(output: &mut dyn Write, message: &str) -> io::Result<()> {
+    writeln!(output, "{message}")
 }
 
-fn write_timer_progress(output: &mut dyn Write, message: &str) {
-    write!(output, "\r{message}").ok();
-    output.flush().ok();
+fn write_timer_progress(output: &mut dyn Write, message: &str) -> io::Result<()> {
+    write!(output, "\r{message}")?;
+    output.flush()
 }
 
 fn run_timer(
@@ -745,15 +762,15 @@ fn run_timer(
         Ordering::Relaxed,
     );
     if let Some(output) = output.as_deref_mut() {
-        write_timer_line(output, &format!("timer started: {}", config.duration));
+        write_timer_line(output, &format!("timer started: {}", config.duration))?;
     }
 
     loop {
         if stop.load(Ordering::Relaxed) {
             if let Some(output) = output.as_deref_mut() {
-                write_timer_line(output, "stopped");
+                write_timer_line(output, "stopped")?;
             }
-            bail!("timer stopped");
+            bail!(TIMER_STOPPED_MSG);
         }
 
         if pause.load(Ordering::Relaxed) {
@@ -778,7 +795,7 @@ fn run_timer(
             write_timer_progress(
                 output,
                 &format!("remaining: {}", format_duration(remaining)),
-            );
+            )?;
         }
         thread::sleep(Duration::from_millis(250));
     }
@@ -786,13 +803,13 @@ fn run_timer(
 
     if stop.load(Ordering::Relaxed) {
         if let Some(output) = output.as_deref_mut() {
-            write_timer_line(output, "stopped");
+            write_timer_line(output, "stopped")?;
         }
         bail!("timer stopped");
     }
 
     if let Some(output) = output.as_deref_mut() {
-        write_timer_line(output, "finished");
+        write_timer_line(output, "finished")?;
     }
     let mut failures = Vec::new();
     let actions = if options.no_actions {
@@ -801,9 +818,15 @@ fn run_timer(
         build_action_commands(config)
     };
     for command in &actions {
+        if stop.load(Ordering::Relaxed) {
+            if let Some(output) = output.as_deref_mut() {
+                write_timer_line(output, "stopped")?;
+            }
+            break;
+        }
         if let Some(output) = output.as_deref_mut() {
             let prefix = if options.dry_run { "would run" } else { "run" };
-            write_timer_line(output, &format!("{prefix}: {}", command.display()));
+            write_timer_line(output, &format!("{prefix}: {}", command.display()))?;
         }
         if options.dry_run {
             continue;
@@ -820,12 +843,8 @@ fn run_timer(
         dry_run: options.dry_run,
         no_actions: options.no_actions,
     };
-    if !failures.is_empty() {
-        bail!(
-            "{} action(s) failed: {}",
-            failures.len(),
-            failures.join("; ")
-        );
+    if !failures.is_empty() && let Some(output) = &mut output {
+        write_timer_line(output, &format!("{} action(s) failed", failures.len()))?;
     }
     Ok(report)
 }
@@ -1359,7 +1378,9 @@ impl App {
             .as_ref()
             .is_some_and(|timer| timer.handle.is_finished())
         {
-            let timer = self.timer.take().expect("timer exists");
+            let Some(timer) = self.timer.take() else {
+                return;
+            };
             self.apply_timer_result(timer.handle.join());
         }
     }
@@ -1367,16 +1388,25 @@ impl App {
     fn apply_timer_result(&mut self, result: thread::Result<Result<TimerReport>>) {
         match result {
             Ok(Ok(report)) => {
-                if let Err(err) = append_history(
-                    &history_path(&self.path),
-                    report.to_history("finished", None),
-                ) {
+                let status = if report.failures.is_empty() {
+                    "finished"
+                } else {
+                    "partial"
+                };
+                if let Err(err) =
+                    append_history(&history_path(&self.path), report.to_history(status, None))
+                {
                     self.status = format!("history failed: {err}");
+                } else if !report.failures.is_empty() {
+                    self.status = format!(
+                        "timer finished ({} action(s) failed)",
+                        report.failures.len()
+                    );
                 } else {
                     self.status = "timer finished".to_string();
                 }
             }
-            Ok(Err(err)) if err.to_string() == "timer stopped" => {
+            Ok(Err(err)) if err.to_string() == TIMER_STOPPED_MSG => {
                 self.status = "timer stopped".to_string()
             }
             Ok(Err(err)) => self.status = format!("timer failed: {err}"),
@@ -1951,7 +1981,7 @@ mod tests {
         config.actions.custom.commands = vec!["false".to_string(), "true".to_string()];
         let mut output = Vec::new();
 
-        let error = run_timer(
+        let report = run_timer(
             &config,
             &stop,
             &Arc::new(AtomicBool::new(false)),
@@ -1960,12 +1990,13 @@ mod tests {
             TimerOptions::default(),
             Some(&mut output),
         )
-        .unwrap_err();
+        .unwrap();
 
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("run: false"));
         assert!(text.contains("run: true"));
-        assert!(error.to_string().contains("1 action(s) failed"));
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].contains("custom failed"));
     }
 
     #[test]
