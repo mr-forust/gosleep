@@ -75,6 +75,7 @@ struct Actions {
     brightness: BrightnessAction,
     mute: ToggleAction,
     lock: LockAction,
+    monitor: MonitorAction,
     kill: KillAction,
     power: PowerAction,
     custom: CustomAction,
@@ -113,6 +114,13 @@ struct ToggleAction {
 struct LockAction {
     enabled: bool,
     command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct MonitorAction {
+    enabled: bool,
+    backend: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -212,6 +220,15 @@ impl Default for LockAction {
         Self {
             enabled: false,
             command: "loginctl lock-session".to_string(),
+        }
+    }
+}
+
+impl Default for MonitorAction {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: "auto".to_string(),
         }
     }
 }
@@ -533,6 +550,9 @@ fn normalize_config(config: &mut Config) {
     if config.actions.lock.command.is_empty() {
         config.actions.lock.command = "loginctl lock-session".to_string();
     }
+    if config.actions.monitor.backend.is_empty() {
+        config.actions.monitor.backend = "auto".to_string();
+    }
     if config.actions.power.mode.is_empty() {
         config.actions.power.mode = "none".to_string();
     }
@@ -545,8 +565,12 @@ fn validate_config(config: &Config) -> Result<()> {
         mode => bail!("invalid power mode {mode:?}"),
     }
     match config.actions.workspace.backend.as_str() {
-        "auto" | "niri" | "hyprland" | "kde" => {}
+        "auto" | "niri" | "hyprland" | "sway" | "i3" | "kde" => {}
         backend => bail!("invalid workspace backend {backend:?}"),
+    }
+    match config.actions.monitor.backend.as_str() {
+        "auto" | "hyprland" | "niri" | "sway" | "kde" | "gnome" | "x11" => {}
+        backend => bail!("invalid monitor backend {backend:?}"),
     }
     match config.actions.media.action.as_str() {
         "none" | "stop" | "pause" | "play-pause" | "next" | "previous" => {}
@@ -636,6 +660,9 @@ fn build_action_commands(config: &Config) -> Vec<ActionCommand> {
             shell: Some(actions.lock.command.clone()),
         });
     }
+    if actions.monitor.enabled {
+        commands.push(monitor_command(&actions.monitor));
+    }
     if actions.kill.enabled {
         for process in &actions.kill.processes {
             let process = process.trim();
@@ -695,6 +722,22 @@ fn workspace_command(action: &WorkspaceAction) -> ActionCommand {
                 .collect(),
             shell: None,
         },
+        "sway" => ActionCommand {
+            label: "workspace",
+            args: vec!["swaymsg", "workspace", "number", &number]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            shell: None,
+        },
+        "i3" => ActionCommand {
+            label: "workspace",
+            args: vec!["i3-msg", "workspace", "number", &number]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            shell: None,
+        },
         "kde" => ActionCommand {
             label: "workspace",
             args: vec![
@@ -713,9 +756,69 @@ fn workspace_command(action: &WorkspaceAction) -> ActionCommand {
             label: "workspace",
             args: vec![],
             shell: Some(format!(
-                "if command -v niri >/dev/null 2>&1; then niri msg action focus-workspace {0}; elif command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch workspace {0}; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.KWin /KWin org.kde.KWin.setCurrentDesktop {0}; fi",
+                "if command -v niri >/dev/null 2>&1; then niri msg action focus-workspace {0}; elif command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch workspace {0}; elif command -v swaymsg >/dev/null 2>&1; then swaymsg workspace number {0}; elif command -v i3-msg >/dev/null 2>&1; then i3-msg workspace number {0}; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.KWin /KWin org.kde.KWin.setCurrentDesktop {0}; fi",
                 number
             )),
+        },
+    }
+}
+
+fn monitor_command(action: &MonitorAction) -> ActionCommand {
+    match action.backend.as_str() {
+        "hyprland" => ActionCommand {
+            label: "monitor",
+            args: vec!["hyprctl", "dispatch", "dpms", "off"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            shell: None,
+        },
+        "niri" => ActionCommand {
+            label: "monitor",
+            args: vec!["niri", "msg", "action", "power-off-monitors"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            shell: None,
+        },
+        "sway" => ActionCommand {
+            label: "monitor",
+            args: vec!["swaymsg", "output", "*", "dpms", "off"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            shell: None,
+        },
+        "kde" => ActionCommand {
+            label: "monitor",
+            args: vec![
+                "qdbus",
+                "org.kde.ScreenSaver",
+                "/ScreenSaver",
+                "org.freedesktop.ScreenSaver.SetActive",
+                "true",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            shell: None,
+        },
+        "gnome" => ActionCommand {
+            label: "monitor",
+            args: vec![],
+            shell: Some("gnome-screensaver-command -l".to_string()),
+        },
+        "x11" => ActionCommand {
+            label: "monitor",
+            args: vec![],
+            shell: Some("xset dpms force off".to_string()),
+        },
+        _ => ActionCommand {
+            label: "monitor",
+            args: vec![],
+            shell: Some(
+                "if command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch dpms off; elif command -v niri >/dev/null 2>&1; then niri msg action power-off-monitors; elif command -v swaymsg >/dev/null 2>&1; then swaymsg output '*' dpms off; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.ScreenSaver /ScreenSaver org.freedesktop.ScreenSaver.SetActive true; elif command -v gnome-screensaver-command >/dev/null 2>&1; then gnome-screensaver-command -l; elif command -v xset >/dev/null 2>&1; then xset dpms force off; fi".to_string()
+            ),
         },
     }
 }
@@ -843,7 +946,9 @@ fn run_timer(
         dry_run: options.dry_run,
         no_actions: options.no_actions,
     };
-    if !failures.is_empty() && let Some(output) = &mut output {
+    if !failures.is_empty()
+        && let Some(output) = &mut output
+    {
         write_timer_line(output, &format!("{} action(s) failed", failures.len()))?;
     }
     Ok(report)
@@ -1441,6 +1546,8 @@ impl App {
             FieldKey::MuteEnabled => on_off(self.config.actions.mute.enabled),
             FieldKey::LockEnabled => on_off(self.config.actions.lock.enabled),
             FieldKey::LockCommand => self.config.actions.lock.command.clone(),
+            FieldKey::MonitorEnabled => on_off(self.config.actions.monitor.enabled),
+            FieldKey::MonitorBackend => self.config.actions.monitor.backend.clone(),
             FieldKey::KillEnabled => on_off(self.config.actions.kill.enabled),
             FieldKey::KillProcesses => self.config.actions.kill.processes.join(","),
             FieldKey::PowerMode => self.config.actions.power.mode.clone(),
@@ -1469,6 +1576,9 @@ impl App {
             FieldKey::KillEnabled => {
                 self.config.actions.kill.enabled = !self.config.actions.kill.enabled
             }
+            FieldKey::MonitorEnabled => {
+                self.config.actions.monitor.enabled = !self.config.actions.monitor.enabled
+            }
             FieldKey::CustomEnabled => {
                 self.config.actions.custom.enabled = !self.config.actions.custom.enabled
             }
@@ -1481,6 +1591,7 @@ impl App {
             FieldKey::WorkspaceBackend => &mut self.config.actions.workspace.backend,
             FieldKey::MediaAction => &mut self.config.actions.media.action,
             FieldKey::PowerMode => &mut self.config.actions.power.mode,
+            FieldKey::MonitorBackend => &mut self.config.actions.monitor.backend,
             _ => return,
         };
         let index = options
@@ -1529,6 +1640,8 @@ enum FieldKey {
     MuteEnabled,
     LockEnabled,
     LockCommand,
+    MonitorEnabled,
+    MonitorBackend,
     KillEnabled,
     KillProcesses,
     PowerMode,
@@ -1550,7 +1663,7 @@ const FIELDS: &[Field] = &[
     Field {
         label: "workspace backend",
         key: FieldKey::WorkspaceBackend,
-        kind: FieldKind::Cycle(&["auto", "niri", "hyprland", "kde"]),
+        kind: FieldKind::Cycle(&["auto", "niri", "hyprland", "sway", "i3", "kde"]),
     },
     Field {
         label: "workspace number",
@@ -1593,6 +1706,16 @@ const FIELDS: &[Field] = &[
         kind: FieldKind::Edit,
     },
     Field {
+        label: "monitor enabled",
+        key: FieldKey::MonitorEnabled,
+        kind: FieldKind::Bool,
+    },
+    Field {
+        label: "monitor backend",
+        key: FieldKey::MonitorBackend,
+        kind: FieldKind::Cycle(&["auto", "hyprland", "niri", "sway", "kde", "gnome", "x11"]),
+    },
+    Field {
         label: "kill enabled",
         key: FieldKey::KillEnabled,
         kind: FieldKind::Bool,
@@ -1632,6 +1755,7 @@ fn field_visible(config: &Config, key: FieldKey) -> bool {
         FieldKey::MediaAction => config.actions.media.enabled,
         FieldKey::BrightnessValue => config.actions.brightness.enabled,
         FieldKey::LockCommand => config.actions.lock.enabled,
+        FieldKey::MonitorBackend => config.actions.monitor.enabled,
         FieldKey::KillProcesses => config.actions.kill.enabled,
         FieldKey::CustomCommands => config.actions.custom.enabled,
         FieldKey::Duration
@@ -1640,6 +1764,7 @@ fn field_visible(config: &Config, key: FieldKey) -> bool {
         | FieldKey::BrightnessEnabled
         | FieldKey::MuteEnabled
         | FieldKey::LockEnabled
+        | FieldKey::MonitorEnabled
         | FieldKey::KillEnabled
         | FieldKey::PowerMode
         | FieldKey::CustomEnabled => true,
@@ -1882,6 +2007,7 @@ mod tests {
         config.actions.brightness.enabled = false;
         config.actions.mute.enabled = false;
         config.actions.lock.enabled = false;
+        config.actions.monitor.enabled = false;
         config.actions.kill.enabled = false;
         config.actions.power.mode = "none".to_string();
         config.actions.custom.enabled = false;
@@ -2051,11 +2177,13 @@ mod tests {
         let keys = visible_field_keys(&config);
         assert!(keys.contains(&FieldKey::Duration));
         assert!(keys.contains(&FieldKey::MediaEnabled));
+        assert!(keys.contains(&FieldKey::MonitorEnabled));
         assert!(!keys.contains(&FieldKey::MediaAction));
         assert!(!keys.contains(&FieldKey::WorkspaceBackend));
         assert!(!keys.contains(&FieldKey::WorkspaceNumber));
         assert!(!keys.contains(&FieldKey::BrightnessValue));
         assert!(!keys.contains(&FieldKey::LockCommand));
+        assert!(!keys.contains(&FieldKey::MonitorBackend));
         assert!(!keys.contains(&FieldKey::KillProcesses));
         assert!(!keys.contains(&FieldKey::CustomCommands));
 
@@ -2063,6 +2191,7 @@ mod tests {
         config.actions.workspace.enabled = true;
         config.actions.brightness.enabled = true;
         config.actions.lock.enabled = true;
+        config.actions.monitor.enabled = true;
         config.actions.kill.enabled = true;
         config.actions.custom.enabled = true;
 
@@ -2072,6 +2201,7 @@ mod tests {
         assert!(keys.contains(&FieldKey::WorkspaceNumber));
         assert!(keys.contains(&FieldKey::BrightnessValue));
         assert!(keys.contains(&FieldKey::LockCommand));
+        assert!(keys.contains(&FieldKey::MonitorBackend));
         assert!(keys.contains(&FieldKey::KillProcesses));
         assert!(keys.contains(&FieldKey::CustomCommands));
     }
