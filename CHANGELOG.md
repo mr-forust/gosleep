@@ -4,6 +4,28 @@ All notable changes to this project are documented here.
 
 The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`.
 
+## [1.3.1] - 2026-07-12
+
+### Added
+
+- Added `mute_input` action to toggle microphone mute via `wpctl`/`pactl`.
+- Added `inhibit_sleep` config option to run `systemd-inhibit` during the timer.
+- Added `monitor` action with backend selection (hyprland, niri, sway, kde, gnome, x11) to turn off displays.
+- Added `notify` action to send desktop notification on timer finish.
+- Added `suspend`, `hibernate`, `hybrid-sleep` power modes.
+- Added workspace backend support for `sway` and `i3`.
+- Added custom `workspace command` override.
+
+### Changed
+
+- Lock action refactored with backend selection: `loginctl`, `hyprlock`, `swaylock`, `i3lock`, `gnome`, `kde`, `xscreensaver`.
+- Editor command now correctly splits `VISUAL`/`EDITOR` into program and arguments.
+- Timer action loop checks the stop flag between actions.
+
+### Fixed
+
+- History now records `partial` status when some actions fail instead of bailing entirely.
+
 ## [1.2.2] - 2026-07-05
 
 ### Changed
@@ -55,6 +77,7 @@ The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`
 - Added YAML configuration, CLI `init`, `preview`, and `run` commands.
 - Added Gitea CI and tag-based release workflows.
 
+[1.3.1]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.3.1
 [1.2.2]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.2.2
 [1.2.1]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.2.1
 [1.2.0]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.2.0
