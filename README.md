@@ -145,6 +145,8 @@ actions:
     value: 30
   mute:
     enabled: false
+  mute_input:
+    enabled: false
   lock:
     enabled: false
     command: loginctl lock-session

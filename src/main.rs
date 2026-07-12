@@ -64,6 +64,7 @@ enum Commands {
 #[serde(default)]
 struct Config {
     duration: String,
+    inhibit_sleep: bool,
     actions: Actions,
 }
 
@@ -74,8 +75,10 @@ struct Actions {
     media: MediaAction,
     brightness: BrightnessAction,
     mute: ToggleAction,
+    mute_input: ToggleAction,
     lock: LockAction,
     monitor: MonitorAction,
+    notify: NotifyAction,
     kill: KillAction,
     power: PowerAction,
     custom: CustomAction,
@@ -87,6 +90,7 @@ struct WorkspaceAction {
     enabled: bool,
     backend: String,
     number: u32,
+    command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +117,7 @@ struct ToggleAction {
 #[serde(default)]
 struct LockAction {
     enabled: bool,
+    backend: String,
     command: String,
 }
 
@@ -121,6 +126,14 @@ struct LockAction {
 struct MonitorAction {
     enabled: bool,
     backend: String,
+    command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct NotifyAction {
+    enabled: bool,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -178,10 +191,22 @@ struct TimerOptions {
     no_actions: bool,
 }
 
+struct InhibitGuard(Option<std::process::Child>);
+
+impl Drop for InhibitGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             duration: "25m".to_string(),
+            inhibit_sleep: false,
             actions: Actions::default(),
         }
     }
@@ -193,6 +218,7 @@ impl Default for WorkspaceAction {
             enabled: true,
             backend: "auto".to_string(),
             number: 3,
+            command: String::new(),
         }
     }
 }
@@ -219,7 +245,8 @@ impl Default for LockAction {
     fn default() -> Self {
         Self {
             enabled: false,
-            command: "loginctl lock-session".to_string(),
+            backend: "auto".to_string(),
+            command: String::new(),
         }
     }
 }
@@ -229,6 +256,16 @@ impl Default for MonitorAction {
         Self {
             enabled: false,
             backend: "auto".to_string(),
+            command: String::new(),
+        }
+    }
+}
+
+impl Default for NotifyAction {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            message: "Timer finished".to_string(),
         }
     }
 }
@@ -547,11 +584,14 @@ fn normalize_config(config: &mut Config) {
     if config.actions.brightness.value > 100 {
         config.actions.brightness.value = 100;
     }
-    if config.actions.lock.command.is_empty() {
-        config.actions.lock.command = "loginctl lock-session".to_string();
+    if config.actions.lock.backend.is_empty() {
+        config.actions.lock.backend = "auto".to_string();
     }
     if config.actions.monitor.backend.is_empty() {
         config.actions.monitor.backend = "auto".to_string();
+    }
+    if config.actions.notify.message.is_empty() {
+        config.actions.notify.message = "Timer finished".to_string();
     }
     if config.actions.power.mode.is_empty() {
         config.actions.power.mode = "none".to_string();
@@ -561,7 +601,7 @@ fn normalize_config(config: &mut Config) {
 fn validate_config(config: &Config) -> Result<()> {
     parse_duration(&config.duration)?;
     match config.actions.power.mode.as_str() {
-        "none" | "poweroff" | "reboot" => {}
+        "none" | "suspend" | "hibernate" | "hybrid-sleep" | "poweroff" | "reboot" => {}
         mode => bail!("invalid power mode {mode:?}"),
     }
     match config.actions.workspace.backend.as_str() {
@@ -571,6 +611,11 @@ fn validate_config(config: &Config) -> Result<()> {
     match config.actions.monitor.backend.as_str() {
         "auto" | "hyprland" | "niri" | "sway" | "kde" | "gnome" | "x11" => {}
         backend => bail!("invalid monitor backend {backend:?}"),
+    }
+    match config.actions.lock.backend.as_str() {
+        "auto" | "loginctl" | "hyprlock" | "swaylock" | "i3lock" | "gnome" | "kde"
+        | "xscreensaver" => {}
+        backend => bail!("invalid lock backend {backend:?}"),
     }
     match config.actions.media.action.as_str() {
         "none" | "stop" | "pause" | "play-pause" | "next" | "previous" => {}
@@ -653,15 +698,30 @@ fn build_action_commands(config: &Config) -> Vec<ActionCommand> {
             ),
         });
     }
-    if actions.lock.enabled {
+    if actions.mute_input.enabled {
         commands.push(ActionCommand {
-            label: "lock",
+            label: "mute_input",
             args: vec![],
-            shell: Some(actions.lock.command.clone()),
+            shell: Some(
+                "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle || pactl set-source-mute @DEFAULT_SOURCE@ toggle".to_string(),
+            ),
         });
+    }
+    if actions.lock.enabled {
+        commands.push(lock_command(&actions.lock));
     }
     if actions.monitor.enabled {
         commands.push(monitor_command(&actions.monitor));
+    }
+    if actions.notify.enabled {
+        commands.push(ActionCommand {
+            label: "notify",
+            args: vec![],
+            shell: Some(format!(
+                "notify-send 'gosleep-timer' '{}'",
+                actions.notify.message
+            )),
+        });
     }
     if actions.kill.enabled {
         for process in &actions.kill.processes {
@@ -676,6 +736,21 @@ fn build_action_commands(config: &Config) -> Vec<ActionCommand> {
         }
     }
     match actions.power.mode.as_str() {
+        "suspend" => commands.push(ActionCommand {
+            label: "power",
+            args: vec!["systemctl".to_string(), "suspend".to_string()],
+            shell: None,
+        }),
+        "hibernate" => commands.push(ActionCommand {
+            label: "power",
+            args: vec!["systemctl".to_string(), "hibernate".to_string()],
+            shell: None,
+        }),
+        "hybrid-sleep" => commands.push(ActionCommand {
+            label: "power",
+            args: vec!["systemctl".to_string(), "hybrid-sleep".to_string()],
+            shell: None,
+        }),
         "poweroff" => commands.push(ActionCommand {
             label: "power",
             args: vec!["systemctl".to_string(), "poweroff".to_string()],
@@ -704,6 +779,13 @@ fn build_action_commands(config: &Config) -> Vec<ActionCommand> {
 }
 
 fn workspace_command(action: &WorkspaceAction) -> ActionCommand {
+    if !action.command.is_empty() {
+        return ActionCommand {
+            label: "workspace",
+            args: vec![],
+            shell: Some(action.command.clone()),
+        };
+    }
     let number = action.number.to_string();
     match action.backend.as_str() {
         "niri" => ActionCommand {
@@ -764,6 +846,13 @@ fn workspace_command(action: &WorkspaceAction) -> ActionCommand {
 }
 
 fn monitor_command(action: &MonitorAction) -> ActionCommand {
+    if !action.command.is_empty() {
+        return ActionCommand {
+            label: "monitor",
+            args: vec![],
+            shell: Some(action.command.clone()),
+        };
+    }
     match action.backend.as_str() {
         "hyprland" => ActionCommand {
             label: "monitor",
@@ -823,6 +912,66 @@ fn monitor_command(action: &MonitorAction) -> ActionCommand {
     }
 }
 
+fn lock_command(action: &LockAction) -> ActionCommand {
+    if !action.command.is_empty() {
+        return ActionCommand {
+            label: "lock",
+            args: vec![],
+            shell: Some(action.command.clone()),
+        };
+    }
+    match action.backend.as_str() {
+        "loginctl" => ActionCommand {
+            label: "lock",
+            args: vec!["loginctl".to_string(), "lock-session".to_string()],
+            shell: None,
+        },
+        "hyprlock" => ActionCommand {
+            label: "lock",
+            args: vec![],
+            shell: Some("hyprctl dispatch exec hyprlock".to_string()),
+        },
+        "swaylock" => ActionCommand {
+            label: "lock",
+            args: vec!["swaylock".to_string()],
+            shell: None,
+        },
+        "i3lock" => ActionCommand {
+            label: "lock",
+            args: vec!["i3lock".to_string()],
+            shell: None,
+        },
+        "gnome" => ActionCommand {
+            label: "lock",
+            args: vec!["gnome-screensaver-command".to_string(), "-l".to_string()],
+            shell: None,
+        },
+        "kde" => ActionCommand {
+            label: "lock",
+            args: vec![
+                "qdbus".to_string(),
+                "org.kde.ScreenSaver".to_string(),
+                "/ScreenSaver".to_string(),
+                "org.freedesktop.ScreenSaver.SetActive".to_string(),
+                "true".to_string(),
+            ],
+            shell: None,
+        },
+        "xscreensaver" => ActionCommand {
+            label: "lock",
+            args: vec!["xscreensaver-command".to_string(), "-lock".to_string()],
+            shell: None,
+        },
+        _ => ActionCommand {
+            label: "lock",
+            args: vec![],
+            shell: Some(
+                "if command -v loginctl >/dev/null 2>&1; then loginctl lock-session; elif command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch exec hyprlock; elif command -v swaylock >/dev/null 2>&1; then swaylock; elif command -v i3lock >/dev/null 2>&1; then i3lock; elif command -v gnome-screensaver-command >/dev/null 2>&1; then gnome-screensaver-command -l; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.ScreenSaver /ScreenSaver org.freedesktop.ScreenSaver.SetActive true; elif command -v xscreensaver-command >/dev/null 2>&1; then xscreensaver-command -lock; fi".to_string()
+            ),
+        },
+    }
+}
+
 fn preview_commands(config: &Config) -> Vec<String> {
     build_action_commands(config)
         .iter()
@@ -864,6 +1013,22 @@ fn run_timer(
         duration.as_millis().min(u128::from(u64::MAX)) as u64,
         Ordering::Relaxed,
     );
+    let _inhibit = if config.inhibit_sleep {
+        let child = Command::new("systemd-inhibit")
+            .args([
+                "--what=sleep",
+                "--who=gosleep-timer",
+                "--why=Timer running",
+                "sleep",
+                "infinity",
+            ])
+            .spawn()
+            .context("spawn systemd-inhibit")?;
+        Some(InhibitGuard(Some(child)))
+    } else {
+        None
+    };
+
     if let Some(output) = output.as_deref_mut() {
         write_timer_line(output, &format!("timer started: {}", config.duration))?;
     }
@@ -1377,7 +1542,10 @@ impl App {
         match field.kind {
             FieldKind::Edit => match field.key {
                 FieldKey::Duration => self.config.duration = value,
+                FieldKey::WorkspaceCommand => self.config.actions.workspace.command = value,
                 FieldKey::LockCommand => self.config.actions.lock.command = value,
+                FieldKey::MonitorCommand => self.config.actions.monitor.command = value,
+                FieldKey::NotifyMessage => self.config.actions.notify.message = value,
                 _ => {}
             },
             FieldKind::Int => {
@@ -1536,18 +1704,25 @@ impl App {
     fn field_value(&self, field: &Field) -> String {
         match field.key {
             FieldKey::Duration => self.config.duration.clone(),
+            FieldKey::InhibitSleep => on_off(self.config.inhibit_sleep),
             FieldKey::WorkspaceEnabled => on_off(self.config.actions.workspace.enabled),
             FieldKey::WorkspaceBackend => self.config.actions.workspace.backend.clone(),
             FieldKey::WorkspaceNumber => self.config.actions.workspace.number.to_string(),
+            FieldKey::WorkspaceCommand => self.config.actions.workspace.command.clone(),
             FieldKey::MediaEnabled => on_off(self.config.actions.media.enabled),
             FieldKey::MediaAction => self.config.actions.media.action.clone(),
             FieldKey::BrightnessEnabled => on_off(self.config.actions.brightness.enabled),
             FieldKey::BrightnessValue => self.config.actions.brightness.value.to_string(),
             FieldKey::MuteEnabled => on_off(self.config.actions.mute.enabled),
+            FieldKey::MuteInputEnabled => on_off(self.config.actions.mute_input.enabled),
             FieldKey::LockEnabled => on_off(self.config.actions.lock.enabled),
+            FieldKey::LockBackend => self.config.actions.lock.backend.clone(),
             FieldKey::LockCommand => self.config.actions.lock.command.clone(),
             FieldKey::MonitorEnabled => on_off(self.config.actions.monitor.enabled),
             FieldKey::MonitorBackend => self.config.actions.monitor.backend.clone(),
+            FieldKey::MonitorCommand => self.config.actions.monitor.command.clone(),
+            FieldKey::NotifyEnabled => on_off(self.config.actions.notify.enabled),
+            FieldKey::NotifyMessage => self.config.actions.notify.message.clone(),
             FieldKey::KillEnabled => on_off(self.config.actions.kill.enabled),
             FieldKey::KillProcesses => self.config.actions.kill.processes.join(","),
             FieldKey::PowerMode => self.config.actions.power.mode.clone(),
@@ -1558,6 +1733,7 @@ impl App {
 
     fn toggle_bool(&mut self, key: FieldKey) {
         match key {
+            FieldKey::InhibitSleep => self.config.inhibit_sleep = !self.config.inhibit_sleep,
             FieldKey::WorkspaceEnabled => {
                 self.config.actions.workspace.enabled = !self.config.actions.workspace.enabled
             }
@@ -1570,6 +1746,9 @@ impl App {
             FieldKey::MuteEnabled => {
                 self.config.actions.mute.enabled = !self.config.actions.mute.enabled
             }
+            FieldKey::MuteInputEnabled => {
+                self.config.actions.mute_input.enabled = !self.config.actions.mute_input.enabled
+            }
             FieldKey::LockEnabled => {
                 self.config.actions.lock.enabled = !self.config.actions.lock.enabled
             }
@@ -1578,6 +1757,9 @@ impl App {
             }
             FieldKey::MonitorEnabled => {
                 self.config.actions.monitor.enabled = !self.config.actions.monitor.enabled
+            }
+            FieldKey::NotifyEnabled => {
+                self.config.actions.notify.enabled = !self.config.actions.notify.enabled
             }
             FieldKey::CustomEnabled => {
                 self.config.actions.custom.enabled = !self.config.actions.custom.enabled
@@ -1592,6 +1774,7 @@ impl App {
             FieldKey::MediaAction => &mut self.config.actions.media.action,
             FieldKey::PowerMode => &mut self.config.actions.power.mode,
             FieldKey::MonitorBackend => &mut self.config.actions.monitor.backend,
+            FieldKey::LockBackend => &mut self.config.actions.lock.backend,
             _ => return,
         };
         let index = options
@@ -1630,18 +1813,25 @@ enum FieldKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FieldKey {
     Duration,
+    InhibitSleep,
     WorkspaceEnabled,
     WorkspaceBackend,
     WorkspaceNumber,
+    WorkspaceCommand,
     MediaEnabled,
     MediaAction,
     BrightnessEnabled,
     BrightnessValue,
     MuteEnabled,
+    MuteInputEnabled,
     LockEnabled,
+    LockBackend,
     LockCommand,
     MonitorEnabled,
     MonitorBackend,
+    MonitorCommand,
+    NotifyEnabled,
+    NotifyMessage,
     KillEnabled,
     KillProcesses,
     PowerMode,
@@ -1654,6 +1844,11 @@ const FIELDS: &[Field] = &[
         label: "duration",
         key: FieldKey::Duration,
         kind: FieldKind::Edit,
+    },
+    Field {
+        label: "inhibit sleep",
+        key: FieldKey::InhibitSleep,
+        kind: FieldKind::Bool,
     },
     Field {
         label: "workspace enabled",
@@ -1669,6 +1864,11 @@ const FIELDS: &[Field] = &[
         label: "workspace number",
         key: FieldKey::WorkspaceNumber,
         kind: FieldKind::Int,
+    },
+    Field {
+        label: "workspace command",
+        key: FieldKey::WorkspaceCommand,
+        kind: FieldKind::Edit,
     },
     Field {
         label: "media enabled",
@@ -1696,9 +1896,28 @@ const FIELDS: &[Field] = &[
         kind: FieldKind::Bool,
     },
     Field {
+        label: "mute input enabled",
+        key: FieldKey::MuteInputEnabled,
+        kind: FieldKind::Bool,
+    },
+    Field {
         label: "lock enabled",
         key: FieldKey::LockEnabled,
         kind: FieldKind::Bool,
+    },
+    Field {
+        label: "lock backend",
+        key: FieldKey::LockBackend,
+        kind: FieldKind::Cycle(&[
+            "auto",
+            "loginctl",
+            "hyprlock",
+            "swaylock",
+            "i3lock",
+            "gnome",
+            "kde",
+            "xscreensaver",
+        ]),
     },
     Field {
         label: "lock command",
@@ -1716,6 +1935,21 @@ const FIELDS: &[Field] = &[
         kind: FieldKind::Cycle(&["auto", "hyprland", "niri", "sway", "kde", "gnome", "x11"]),
     },
     Field {
+        label: "monitor command",
+        key: FieldKey::MonitorCommand,
+        kind: FieldKind::Edit,
+    },
+    Field {
+        label: "notify enabled",
+        key: FieldKey::NotifyEnabled,
+        kind: FieldKind::Bool,
+    },
+    Field {
+        label: "notify message",
+        key: FieldKey::NotifyMessage,
+        kind: FieldKind::Edit,
+    },
+    Field {
         label: "kill enabled",
         key: FieldKey::KillEnabled,
         kind: FieldKind::Bool,
@@ -1728,7 +1962,14 @@ const FIELDS: &[Field] = &[
     Field {
         label: "power mode",
         key: FieldKey::PowerMode,
-        kind: FieldKind::Cycle(&["none", "poweroff", "reboot"]),
+        kind: FieldKind::Cycle(&[
+            "none",
+            "suspend",
+            "hibernate",
+            "hybrid-sleep",
+            "poweroff",
+            "reboot",
+        ]),
     },
     Field {
         label: "custom enabled",
@@ -1751,20 +1992,26 @@ fn visible_fields(config: &Config) -> Vec<&'static Field> {
 
 fn field_visible(config: &Config, key: FieldKey) -> bool {
     match key {
-        FieldKey::WorkspaceBackend | FieldKey::WorkspaceNumber => config.actions.workspace.enabled,
+        FieldKey::WorkspaceBackend | FieldKey::WorkspaceNumber | FieldKey::WorkspaceCommand => {
+            config.actions.workspace.enabled
+        }
         FieldKey::MediaAction => config.actions.media.enabled,
         FieldKey::BrightnessValue => config.actions.brightness.enabled,
-        FieldKey::LockCommand => config.actions.lock.enabled,
-        FieldKey::MonitorBackend => config.actions.monitor.enabled,
+        FieldKey::LockBackend | FieldKey::LockCommand => config.actions.lock.enabled,
+        FieldKey::MonitorBackend | FieldKey::MonitorCommand => config.actions.monitor.enabled,
+        FieldKey::NotifyMessage => config.actions.notify.enabled,
         FieldKey::KillProcesses => config.actions.kill.enabled,
         FieldKey::CustomCommands => config.actions.custom.enabled,
         FieldKey::Duration
+        | FieldKey::InhibitSleep
         | FieldKey::WorkspaceEnabled
         | FieldKey::MediaEnabled
         | FieldKey::BrightnessEnabled
         | FieldKey::MuteEnabled
+        | FieldKey::MuteInputEnabled
         | FieldKey::LockEnabled
         | FieldKey::MonitorEnabled
+        | FieldKey::NotifyEnabled
         | FieldKey::KillEnabled
         | FieldKey::PowerMode
         | FieldKey::CustomEnabled => true,
@@ -2006,8 +2253,10 @@ mod tests {
         config.actions.media.enabled = false;
         config.actions.brightness.enabled = false;
         config.actions.mute.enabled = false;
+        config.actions.mute_input.enabled = false;
         config.actions.lock.enabled = false;
         config.actions.monitor.enabled = false;
+        config.actions.notify.enabled = false;
         config.actions.kill.enabled = false;
         config.actions.power.mode = "none".to_string();
         config.actions.custom.enabled = false;
@@ -2027,6 +2276,7 @@ mod tests {
     fn preview_matches_expected_commands() {
         let mut config = Config::default();
         config.actions.lock.enabled = true;
+        config.actions.lock.backend = "loginctl".to_string();
         config.actions.kill.enabled = true;
         config.actions.kill.processes = vec!["firefox".to_string(), "telegram-desktop".to_string()];
         config.actions.custom.enabled = true;
@@ -2134,7 +2384,7 @@ mod tests {
         ));
         fs::write(
             &path,
-            "duration: 25m\nactions:\n  power:\n    mode: suspend\n",
+            "duration: 25m\nactions:\n  power:\n    mode: bogus\n",
         )
         .unwrap();
 
@@ -2176,14 +2426,20 @@ mod tests {
 
         let keys = visible_field_keys(&config);
         assert!(keys.contains(&FieldKey::Duration));
+        assert!(keys.contains(&FieldKey::InhibitSleep));
         assert!(keys.contains(&FieldKey::MediaEnabled));
         assert!(keys.contains(&FieldKey::MonitorEnabled));
+        assert!(keys.contains(&FieldKey::NotifyEnabled));
         assert!(!keys.contains(&FieldKey::MediaAction));
         assert!(!keys.contains(&FieldKey::WorkspaceBackend));
         assert!(!keys.contains(&FieldKey::WorkspaceNumber));
+        assert!(!keys.contains(&FieldKey::WorkspaceCommand));
         assert!(!keys.contains(&FieldKey::BrightnessValue));
+        assert!(!keys.contains(&FieldKey::LockBackend));
         assert!(!keys.contains(&FieldKey::LockCommand));
         assert!(!keys.contains(&FieldKey::MonitorBackend));
+        assert!(!keys.contains(&FieldKey::MonitorCommand));
+        assert!(!keys.contains(&FieldKey::NotifyMessage));
         assert!(!keys.contains(&FieldKey::KillProcesses));
         assert!(!keys.contains(&FieldKey::CustomCommands));
 
@@ -2192,6 +2448,7 @@ mod tests {
         config.actions.brightness.enabled = true;
         config.actions.lock.enabled = true;
         config.actions.monitor.enabled = true;
+        config.actions.notify.enabled = true;
         config.actions.kill.enabled = true;
         config.actions.custom.enabled = true;
 
@@ -2199,9 +2456,13 @@ mod tests {
         assert!(keys.contains(&FieldKey::MediaAction));
         assert!(keys.contains(&FieldKey::WorkspaceBackend));
         assert!(keys.contains(&FieldKey::WorkspaceNumber));
+        assert!(keys.contains(&FieldKey::WorkspaceCommand));
         assert!(keys.contains(&FieldKey::BrightnessValue));
+        assert!(keys.contains(&FieldKey::LockBackend));
         assert!(keys.contains(&FieldKey::LockCommand));
         assert!(keys.contains(&FieldKey::MonitorBackend));
+        assert!(keys.contains(&FieldKey::MonitorCommand));
+        assert!(keys.contains(&FieldKey::NotifyMessage));
         assert!(keys.contains(&FieldKey::KillProcesses));
         assert!(keys.contains(&FieldKey::CustomCommands));
     }
