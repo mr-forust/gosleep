@@ -703,7 +703,7 @@ fn build_action_commands(config: &Config) -> Vec<ActionCommand> {
             label: "mute_input",
             args: vec![],
             shell: Some(
-                "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0 || pactl set-source-mute @DEFAULT_SOURCE@ 1".to_string(),
+                "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 1 || pactl set-source-mute @DEFAULT_SOURCE@ 1".to_string(),
             ),
         });
     }
