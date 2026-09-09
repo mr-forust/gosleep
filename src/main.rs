@@ -23,7 +23,7 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap},
@@ -284,10 +284,19 @@ impl ActionCommand {
     }
 
     fn is_dangerous(&self) -> bool {
+        if self.label == "notify" {
+            return false;
+        }
         if matches!(self.label, "kill" | "power") {
             return true;
         }
-        let command = self.display().to_lowercase();
+        let Some(shell) = &self.shell else {
+            return false;
+        };
+        if matches!(self.label, "custom" | "workspace" | "monitor" | "lock") {
+            return true;
+        }
+        let command = shell.to_lowercase();
         [
             "rm -rf",
             "mkfs",
@@ -716,11 +725,13 @@ fn build_action_commands(config: &Config) -> Vec<ActionCommand> {
     if actions.notify.enabled {
         commands.push(ActionCommand {
             label: "notify",
-            args: vec![],
-            shell: Some(format!(
-                "notify-send 'gosleep-timer' '{}'",
-                actions.notify.message
-            )),
+            args: vec![
+                "notify-send".to_string(),
+                "gosleep-timer".to_string(),
+                "--".to_string(),
+                actions.notify.message.clone(),
+            ],
+            shell: None,
         });
     }
     if actions.kill.enabled {
@@ -729,7 +740,7 @@ fn build_action_commands(config: &Config) -> Vec<ActionCommand> {
             if !process.is_empty() {
                 commands.push(ActionCommand {
                     label: "kill",
-                    args: vec!["pkill".to_string(), process.to_string()],
+                    args: vec!["pkill".to_string(), "--".to_string(), process.to_string()],
                     shell: None,
                 });
             }
@@ -880,16 +891,10 @@ fn monitor_command(action: &MonitorAction) -> ActionCommand {
         },
         "kde" => ActionCommand {
             label: "monitor",
-            args: vec![
-                "qdbus",
-                "org.kde.ScreenSaver",
-                "/ScreenSaver",
-                "org.freedesktop.ScreenSaver.SetActive",
-                "true",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+            args: vec!["kscreen-doctor", "--dpms", "off"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             shell: None,
         },
         "gnome" => ActionCommand {
@@ -906,7 +911,7 @@ fn monitor_command(action: &MonitorAction) -> ActionCommand {
             label: "monitor",
             args: vec![],
             shell: Some(
-                "if command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch dpms off; elif command -v niri >/dev/null 2>&1; then niri msg action power-off-monitors; elif command -v swaymsg >/dev/null 2>&1; then swaymsg output '*' dpms off; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.ScreenSaver /ScreenSaver org.freedesktop.ScreenSaver.SetActive true; elif command -v gnome-screensaver-command >/dev/null 2>&1; then gnome-screensaver-command -l; elif command -v xset >/dev/null 2>&1; then xset dpms force off; fi".to_string()
+                "if command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch dpms off; elif command -v niri >/dev/null 2>&1; then niri msg action power-off-monitors; elif command -v swaymsg >/dev/null 2>&1; then swaymsg output '*' dpms off; elif command -v kscreen-doctor >/dev/null 2>&1; then kscreen-doctor --dpms off; elif command -v gnome-screensaver-command >/dev/null 2>&1; then gnome-screensaver-command -l; elif command -v xset >/dev/null 2>&1; then xset dpms force off; fi".to_string()
             ),
         },
     }
@@ -1189,7 +1194,7 @@ struct EditState {
 impl App {
     fn new(path: PathBuf, config: Config) -> Self {
         Self {
-            status: format!("loaded {}", path.display()),
+            status: format!("loaded config: {}", path.display()),
             path,
             config,
             focus: 0,
@@ -1255,7 +1260,7 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(5),
+                Constraint::Length(4),
                 Constraint::Min(5),
                 Constraint::Length(1),
             ])
@@ -1263,11 +1268,8 @@ impl App {
 
         self.draw_header(frame, chunks[0]);
         self.draw_body(frame, chunks[1]);
-        let footer = if let Some(edit) = &self.edit {
-            format!(
-                "editing {}: {} | enter apply | esc cancel",
-                edit.field.label, edit.value
-            )
+        let footer = if self.edit.is_some() {
+            "enter apply | esc cancel".to_string()
         } else {
             "space/enter edit-toggle | r run | p pause | x stop | s save | q quit".to_string()
         };
@@ -1283,10 +1285,10 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(1),
-                Constraint::Length(9),
+                Constraint::Length(10),
                 Constraint::Min(1),
                 Constraint::Length(2),
-                Constraint::Length(8),
+                Constraint::Length(7),
                 Constraint::Length(1),
             ])
             .split(area);
@@ -1368,41 +1370,41 @@ impl App {
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Length(1),
-                Constraint::Length(1),
             ])
             .split(area);
         frame.render_widget(
-            Paragraph::new("gosleep-timer").style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Paragraph::new("gosleep-timer")
+                .alignment(Alignment::Center)
+                .style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
             header[0],
         );
         frame.render_widget(
-            Paragraph::new(format!("config: {}", self.path.display()))
-                .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(self.status.clone())
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::Yellow))
+                .wrap(Wrap { trim: false }),
             header[1],
-        );
-        frame.render_widget(
-            Paragraph::new(self.status.clone()).style(Style::default().fg(Color::Yellow)),
-            header[2],
         );
         frame.render_widget(
             Paragraph::new(format_time_left_text(
                 self.timer.as_ref(),
                 remaining,
-                header[3].width,
+                header[2].width,
             ))
+            .alignment(Alignment::Center)
             .style(Style::default().fg(Color::White)),
-            header[3],
+            header[2],
         );
         frame.render_widget(
             Gauge::default()
                 .gauge_style(Style::default().fg(Color::Magenta))
                 .label(format_gauge_label(progress))
                 .ratio(progress),
-            header[4],
+            header[3],
         );
     }
 
@@ -1444,8 +1446,19 @@ impl App {
             .map(|(index, field)| {
                 let selected = index == self.focus;
                 let marker = if selected { ">" } else { " " };
-                let line = format!("{marker} {:<20} {}", field.label, self.field_value(field));
-                let style = if selected {
+                let editing = self
+                    .edit
+                    .as_ref()
+                    .is_some_and(|edit| edit.field.key == field.key);
+                let value = if editing {
+                    format!("{}▌", self.edit.as_ref().expect("edit checked").value)
+                } else {
+                    self.field_value(field)
+                };
+                let line = format!("{marker} {:<20} {}", field.label, value);
+                let style = if editing {
+                    Style::default().fg(Color::Black).bg(Color::Yellow)
+                } else if selected {
                     Style::default().fg(Color::Black).bg(Color::Cyan)
                 } else {
                     Style::default()
@@ -1518,10 +1531,13 @@ impl App {
         match key {
             KeyCode::Esc => self.edit = None,
             KeyCode::Enter => {
-                if let Some(edit) = self.edit.take()
-                    && let Err(err) = self.apply_edit(edit.field, edit.value)
-                {
-                    self.status = format!("edit failed: {err}");
+                let (field, value) = match &self.edit {
+                    Some(edit) => (edit.field, edit.value.clone()),
+                    None => return,
+                };
+                match self.apply_edit(field, value) {
+                    Ok(()) => self.edit = None,
+                    Err(err) => self.status = format!("edit failed: {err}"),
                 }
             }
             KeyCode::Backspace => {
@@ -1586,6 +1602,10 @@ impl App {
 
     fn start_timer(&mut self) {
         self.stop_timer();
+        if let Err(err) = validate_config(&self.config) {
+            self.status = format!("timer failed: {err}");
+            return;
+        }
         let duration = match parse_duration(&self.config.duration) {
             Ok(duration) => duration,
             Err(err) => {
@@ -1846,9 +1866,34 @@ const FIELDS: &[Field] = &[
         kind: FieldKind::Edit,
     },
     Field {
-        label: "inhibit sleep",
-        key: FieldKey::InhibitSleep,
+        label: "media enabled",
+        key: FieldKey::MediaEnabled,
         kind: FieldKind::Bool,
+    },
+    Field {
+        label: "media key action",
+        key: FieldKey::MediaAction,
+        kind: FieldKind::Cycle(&["stop", "pause", "play-pause", "next", "previous", "none"]),
+    },
+    Field {
+        label: "mute enabled",
+        key: FieldKey::MuteEnabled,
+        kind: FieldKind::Bool,
+    },
+    Field {
+        label: "mic mute enabled",
+        key: FieldKey::MuteInputEnabled,
+        kind: FieldKind::Bool,
+    },
+    Field {
+        label: "brightness enabled",
+        key: FieldKey::BrightnessEnabled,
+        kind: FieldKind::Bool,
+    },
+    Field {
+        label: "brightness value",
+        key: FieldKey::BrightnessValue,
+        kind: FieldKind::Int,
     },
     Field {
         label: "workspace enabled",
@@ -1869,36 +1914,6 @@ const FIELDS: &[Field] = &[
         label: "workspace command",
         key: FieldKey::WorkspaceCommand,
         kind: FieldKind::Edit,
-    },
-    Field {
-        label: "media enabled",
-        key: FieldKey::MediaEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "media action",
-        key: FieldKey::MediaAction,
-        kind: FieldKind::Cycle(&["stop", "pause", "play-pause", "next", "previous", "none"]),
-    },
-    Field {
-        label: "brightness enabled",
-        key: FieldKey::BrightnessEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "brightness value",
-        key: FieldKey::BrightnessValue,
-        kind: FieldKind::Int,
-    },
-    Field {
-        label: "mute enabled",
-        key: FieldKey::MuteEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "mute input enabled",
-        key: FieldKey::MuteInputEnabled,
-        kind: FieldKind::Bool,
     },
     Field {
         label: "lock enabled",
@@ -1925,32 +1940,37 @@ const FIELDS: &[Field] = &[
         kind: FieldKind::Edit,
     },
     Field {
-        label: "monitor enabled",
+        label: "screen poweroff",
         key: FieldKey::MonitorEnabled,
         kind: FieldKind::Bool,
     },
     Field {
-        label: "monitor backend",
+        label: "screen poweroff backend",
         key: FieldKey::MonitorBackend,
         kind: FieldKind::Cycle(&["auto", "hyprland", "niri", "sway", "kde", "gnome", "x11"]),
     },
     Field {
-        label: "monitor command",
+        label: "screen poweroff command",
         key: FieldKey::MonitorCommand,
         kind: FieldKind::Edit,
     },
     Field {
-        label: "notify enabled",
+        label: "prevent sleep",
+        key: FieldKey::InhibitSleep,
+        kind: FieldKind::Bool,
+    },
+    Field {
+        label: "notification",
         key: FieldKey::NotifyEnabled,
         kind: FieldKind::Bool,
     },
     Field {
-        label: "notify message",
+        label: "notification message",
         key: FieldKey::NotifyMessage,
         kind: FieldKind::Edit,
     },
     Field {
-        label: "kill enabled",
+        label: "kill processes",
         key: FieldKey::KillEnabled,
         kind: FieldKind::Bool,
     },
@@ -1960,7 +1980,7 @@ const FIELDS: &[Field] = &[
         kind: FieldKind::Csv,
     },
     Field {
-        label: "power mode",
+        label: "power",
         key: FieldKey::PowerMode,
         kind: FieldKind::Cycle(&[
             "none",
@@ -1977,7 +1997,7 @@ const FIELDS: &[Field] = &[
         kind: FieldKind::Bool,
     },
     Field {
-        label: "custom commands",
+        label: "custom shell cmds",
         key: FieldKey::CustomCommands,
         kind: FieldKind::Semi,
     },
@@ -2286,9 +2306,150 @@ mod tests {
         assert_eq!(preview.len(), 6);
         assert_eq!(preview[1], "playerctl stop");
         assert_eq!(preview[2], "loginctl lock-session");
-        assert_eq!(preview[3], "pkill firefox");
-        assert_eq!(preview[4], "pkill telegram-desktop");
+        assert_eq!(preview[3], "pkill -- firefox");
+        assert_eq!(preview[4], "pkill -- telegram-desktop");
         assert_eq!(preview[5], "echo done");
+    }
+
+    #[test]
+    fn notify_message_with_quote_stays_single_argument() {
+        let mut config = quiet_config("25m");
+        config.actions.notify.enabled = true;
+        config.actions.notify.message = "it's done".to_string();
+
+        let commands = build_action_commands(&config);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].label, "notify");
+        assert!(commands[0].shell.is_none());
+        assert_eq!(
+            commands[0].args,
+            vec![
+                "notify-send".to_string(),
+                "gosleep-timer".to_string(),
+                "--".to_string(),
+                "it's done".to_string(),
+            ]
+        );
+        assert_eq!(
+            commands[0].display(),
+            "notify-send gosleep-timer -- it's done"
+        );
+        assert_eq!(preview_commands(&config), vec![commands[0].display()]);
+    }
+
+    #[test]
+    fn kill_process_with_leading_dash_uses_separator() {
+        let mut config = quiet_config("25m");
+        config.actions.kill.enabled = true;
+        config.actions.kill.processes = vec!["-evil".to_string()];
+
+        let commands = build_action_commands(&config);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            commands[0].args,
+            vec!["pkill".to_string(), "--".to_string(), "-evil".to_string(),]
+        );
+        assert!(commands[0].shell.is_none());
+    }
+
+    #[test]
+    fn dangerous_flags_cover_shell_overrides_without_notify_false_positives() {
+        let notify = ActionCommand {
+            label: "notify",
+            args: vec![
+                "notify-send".to_string(),
+                "gosleep-timer".to_string(),
+                "--".to_string(),
+                "please rm -rf /".to_string(),
+            ],
+            shell: None,
+        };
+        assert!(!notify.is_dangerous());
+
+        let custom = ActionCommand {
+            label: "custom",
+            args: vec![],
+            shell: Some("echo done".to_string()),
+        };
+        assert!(custom.is_dangerous());
+
+        for label in ["workspace", "monitor", "lock"] {
+            let command = ActionCommand {
+                label,
+                args: vec![],
+                shell: Some("my-custom-command".to_string()),
+            };
+            assert!(command.is_dangerous(), "{label} override must be flagged");
+        }
+
+        let workspace_args = workspace_command(&WorkspaceAction {
+            backend: "sway".to_string(),
+            number: 3,
+            ..WorkspaceAction::default()
+        });
+        assert!(workspace_args.shell.is_none());
+        assert!(!workspace_args.is_dangerous());
+
+        let media = ActionCommand {
+            label: "media",
+            args: vec!["playerctl".to_string(), "stop".to_string()],
+            shell: None,
+        };
+        assert!(!media.is_dangerous());
+    }
+
+    #[test]
+    fn failed_edit_keeps_input_for_retry() {
+        let mut app = App::new(
+            PathBuf::from("/tmp/gosleep-timer-test.yaml"),
+            quiet_config("25m"),
+        );
+        app.edit = Some(EditState {
+            field: Field {
+                label: "workspace number",
+                key: FieldKey::WorkspaceNumber,
+                kind: FieldKind::Int,
+            },
+            value: "not-a-number".to_string(),
+        });
+
+        app.handle_edit_key(KeyCode::Enter);
+
+        assert_eq!(app.edit.as_ref().expect("edit kept").value, "not-a-number");
+        assert!(app.status.starts_with("edit failed:"));
+    }
+
+    #[test]
+    fn successful_edit_clears_input() {
+        let mut app = App::new(
+            PathBuf::from("/tmp/gosleep-timer-test.yaml"),
+            quiet_config("25m"),
+        );
+        app.edit = Some(EditState {
+            field: Field {
+                label: "workspace number",
+                key: FieldKey::WorkspaceNumber,
+                kind: FieldKind::Int,
+            },
+            value: "5".to_string(),
+        });
+
+        app.handle_edit_key(KeyCode::Enter);
+
+        assert!(app.edit.is_none());
+        assert_eq!(app.config.actions.workspace.number, 5);
+    }
+
+    #[test]
+    fn start_timer_rejects_invalid_config_without_spawning() {
+        let mut config = quiet_config("25m");
+        config.actions.power.mode = "bogus".to_string();
+        let mut app = App::new(PathBuf::from("/tmp/gosleep-timer-test.yaml"), config);
+
+        app.start_timer();
+
+        assert!(app.timer.is_none());
+        assert!(app.status.starts_with("timer failed:"));
     }
 
     #[test]
@@ -2475,6 +2636,50 @@ mod tests {
         assert_eq!(rows.len(), 7);
         assert!(width > 0);
         assert!(rows.iter().all(|row| row.len() == width));
+    }
+
+    #[test]
+    fn kde_monitor_uses_dpms_off_and_differs_from_lock() {
+        let monitor = MonitorAction {
+            backend: "kde".to_string(),
+            ..MonitorAction::default()
+        };
+        let lock = LockAction {
+            backend: "kde".to_string(),
+            ..LockAction::default()
+        };
+
+        assert_eq!(
+            monitor_command(&monitor).display(),
+            "kscreen-doctor --dpms off"
+        );
+        assert_ne!(
+            monitor_command(&monitor).display(),
+            lock_command(&lock).display()
+        );
+    }
+
+    #[test]
+    fn sway_and_i3_workspace_use_workspace_number() {
+        let sway = WorkspaceAction {
+            backend: "sway".to_string(),
+            number: 3,
+            ..WorkspaceAction::default()
+        };
+        let i3 = WorkspaceAction {
+            backend: "i3".to_string(),
+            number: 3,
+            ..WorkspaceAction::default()
+        };
+
+        assert_eq!(
+            workspace_command(&sway).display(),
+            "swaymsg workspace number 3"
+        );
+        assert_eq!(
+            workspace_command(&i3).display(),
+            "i3-msg workspace number 3"
+        );
     }
 
     fn visible_field_keys(config: &Config) -> Vec<FieldKey> {

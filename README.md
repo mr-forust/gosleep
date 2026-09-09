@@ -2,7 +2,7 @@
 
 Rust TUI sleep timer for Linux desktop actions.
 
-`gosleep-timer` waits for a configured duration, then runs post-countdown desktop commands such as switching workspace, stopping media, dimming brightness, muting audio, locking the session, killing selected processes, powering off/rebooting, or running custom shell commands.
+`gosleep-timer` waits for a configured duration, then runs post-countdown desktop commands such as switching workspace, stopping media, dimming brightness, muting audio, locking the session, turning the screen off, sending a desktop notification, killing selected processes, powering off/rebooting, or running custom shell commands.
 
 ## Status
 
@@ -18,7 +18,7 @@ Rust TUI sleep timer for Linux desktop actions.
 - CLI commands for init, status, validate, edit, preview, run, history, and stats.
 - Time-left display and progress bar.
 - Wrapped command preview for smaller terminals.
-- Linux desktop action support for niri, Hyprland, KDE, playerctl, brightnessctl/light, PipeWire/PulseAudio, systemd, and custom shell commands.
+- Linux desktop action support for niri, Hyprland, sway, i3, KDE, playerctl, brightnessctl/light, PipeWire/PulseAudio, systemd, desktop notifications, and custom shell commands.
 
 ## Install
 
@@ -165,7 +165,7 @@ Supported values:
 | Field | Values |
 | --- | --- |
 | `duration` | Go-style duration strings such as `25m`, `45m`, `1h30m`, `10s` |
-| `actions.workspace.backend` | `auto`, `niri`, `hyprland`, `kde` |
+| `actions.workspace.backend` | `auto`, `niri`, `hyprland`, `sway`, `i3`, `kde` |
 | `actions.media.action` | `none`, `stop`, `pause`, `play-pause`, `next`, `previous` |
 | `actions.power.mode` | `none`, `poweroff`, `reboot` |
 
@@ -176,8 +176,12 @@ Supported values:
 ```sh
 niri msg action focus-workspace <number>
 hyprctl dispatch workspace <number>
+swaymsg workspace number <number>
+i3-msg workspace number <number>
 qdbus org.kde.KWin /KWin org.kde.KWin.setCurrentDesktop <number>
 ```
+
+Screen off (`monitor`) on KDE runs `kscreen-doctor --dpms off`, desktop notifications (`notify`) use `notify-send`, and `inhibit_sleep` maps to the TUI `prevent sleep` toggle.
 
 Other actions use common Linux desktop tools:
 
@@ -185,6 +189,8 @@ Other actions use common Linux desktop tools:
 - `brightnessctl` or `light`
 - `wpctl` or `pactl`
 - `loginctl`
+- `kscreen-doctor`
+- `notify-send`
 - `pkill`
 - `systemctl`
 

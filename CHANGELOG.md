@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 
 The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`.
 
+## [1.3.3] - 2026-09-09
+
+### Fixed
+
+- Closed shell injection via `notify.message` — `notify-send` now uses direct args.
+- Separated KDE monitor handling from lock — uses `kscreen-doctor --dpms off`.
+- `pkill` and `notify-send` use `--` separator against option-injection.
+- `is_dangerous` no longer false-positives on notify text and flags user-controlled shell.
+- Edit error no longer loses input.
+- `start_timer` validates config before spawning the thread.
+
+### Changed
+
+- TUI header centered and collapsed into `loaded config:`.
+- Settings renamed/regrouped — screen off, mic mute, prevent sleep, power, kill processes.
+- `enabled` suffix shown only for enabled actions.
+- Edit input visible inline while editing.
+- README synced: sway/i3, kscreen-doctor, notify.
+
 ## [1.3.2] - 2026-08-07
 
 ### Changed
@@ -83,6 +102,7 @@ The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`
 - Added YAML configuration, CLI `init`, `preview`, and `run` commands.
 - Added Gitea CI and tag-based release workflows.
 
+[1.3.3]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.3.3
 [1.3.2]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.3.2
 [1.3.1]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.3.1
 [1.2.2]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.2.2
