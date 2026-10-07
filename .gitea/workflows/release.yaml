@@ -13,15 +13,17 @@ jobs:
   verify:
     runs-on: [self-hosted, linux, arch, homelab]
     timeout-minutes: 30
+    container:
+      image: rust:1.99-bookworm
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Install Rust stable toolchain
+      - name: Install Rust components
         shell: bash
-        run: bash .gitea/workflows/install-rust.sh
+        run: rustup component add clippy rustfmt
 
       - name: Check release tag and version files
         shell: bash
@@ -58,6 +60,8 @@ jobs:
     needs: verify
     runs-on: [self-hosted, linux, arch, homelab]
     timeout-minutes: 30
+    container:
+      image: rust:1.99-bookworm
     permissions:
       contents: write
     env:
@@ -68,9 +72,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust stable toolchain
+      - name: Install release tools
         shell: bash
-        run: bash .gitea/workflows/install-rust.sh
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends curl jq
 
       - name: Build release binary
         shell: bash

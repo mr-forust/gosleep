@@ -30,8 +30,8 @@ https://git.forust.xyz/forust/gosleep.git
 1. Enable Actions for `forust/gosleep`.
 2. Register or select a Linux runner with labels used by the workflows:
    `self-hosted`, `linux`, `arch`, `homelab`.
-3. Ensure the runner has `curl`, `jq`, `sha256sum`, and Docker for YAML lint.
-   The workflows install the Rust stable toolchain with `rustup` when needed.
+3. Ensure the runner has Docker, `curl`, `jq`, and `sha256sum`. Docker runs the
+   pinned Rust toolchain container and the YAML lint container.
 4. Confirm Actions job token permissions allow `contents: write`.
    The release workflow uses Gitea Actions' built-in `GITEA_TOKEN`, exposed in the workflow as `${{ secrets.GITEA_TOKEN }}`; no extra repository secret is required.
 
