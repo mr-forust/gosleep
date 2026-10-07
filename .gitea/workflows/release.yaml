@@ -14,16 +14,16 @@ jobs:
     runs-on: [self-hosted, linux, arch, homelab]
     timeout-minutes: 30
     container:
-      image: rust:1.99-bookworm
+      image: node:22.23.3-bookworm
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Install Rust components
+      - name: Install Rust stable toolchain
         shell: bash
-        run: rustup component add clippy rustfmt
+        run: bash .gitea/workflows/install-rust.sh
 
       - name: Check release tag and version files
         shell: bash
@@ -61,7 +61,7 @@ jobs:
     runs-on: [self-hosted, linux, arch, homelab]
     timeout-minutes: 30
     container:
-      image: rust:1.99-bookworm
+      image: node:22.23.3-bookworm
     permissions:
       contents: write
     env:
