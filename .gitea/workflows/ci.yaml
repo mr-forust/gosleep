@@ -38,8 +38,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          metadata="$(cargo metadata --no-deps --format-version 1)"
-          package_version="$(jq -r '.packages[] | select(.name == "gosleep-timer") | .version' <<< "$metadata")"
+          package_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
           test -n "$package_version"
           test "$(cat VERSION)" = "$package_version"
 
