@@ -7,20 +7,37 @@ name: ci
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   rust:
     runs-on: [self-hosted, linux, arch, homelab]
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Cache Cargo registry and build
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
+            ~/.cargo/git
             target
-          key: cargo-${{ hashFiles('Cargo.lock') }}
+          key: >-
+            cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Check version consistency
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="$(cargo metadata --no-deps --format-version 1)"
+          package_version="$(jq -r '.packages[] | select(.name == "gosleep-timer") | .version' <<< "$metadata")"
+          test -n "$package_version"
+          test "$(cat VERSION)" = "$package_version"
 
       - name: Check formatting
         shell: bash
@@ -40,9 +57,12 @@ jobs:
 
   lint-yaml:
     runs-on: [self-hosted, linux, arch, homelab]
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Lint YAML
         shell: bash

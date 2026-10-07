@@ -7,7 +7,7 @@ Rust TUI sleep timer for Linux desktop actions.
 ## Status
 
 - Release tags: `vMAJOR.MINOR.PATCH`
-- Primary repository: <https://gitea.forust.xyz/forust/gosleep>
+- Primary repository: <https://git.forust.xyz/forust/gosleep>
 - SSH upstream: `ssh://git@gitssh.forust.xyz:2221/forust/gosleep.git`
 
 ## Features
@@ -149,7 +149,7 @@ actions:
     enabled: false
   lock:
     enabled: false
-    command: loginctl lock-session
+    backend: auto
   kill:
     enabled: false
     processes: []
@@ -167,7 +167,12 @@ Supported values:
 | `duration` | Go-style duration strings such as `25m`, `45m`, `1h30m`, `10s` |
 | `actions.workspace.backend` | `auto`, `niri`, `hyprland`, `sway`, `i3`, `kde` |
 | `actions.media.action` | `none`, `stop`, `pause`, `play-pause`, `next`, `previous` |
-| `actions.power.mode` | `none`, `poweroff`, `reboot` |
+| `actions.monitor.backend` | `auto`, `hyprland`, `niri`, `sway`, `kde`, `x11` |
+| `actions.power.mode` | `none`, `suspend`, `hibernate`, `hybrid-sleep`, `poweroff`, `reboot` |
+
+Native GNOME monitor power-off is not supported. The `auto` backend reports an
+action failure when it cannot find a supported backend. Use the custom monitor
+command for a desktop-specific command.
 
 ## Commands Run After Countdown
 

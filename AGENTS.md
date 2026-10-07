@@ -102,7 +102,7 @@ origin ssh://git@gitssh.forust.xyz:2221/forust/gosleep.git
 HTTPS remote URL:
 
 ```text
-https://gitea.forust.xyz/forust/gosleep.git
+https://git.forust.xyz/forust/gosleep.git
 ```
 
 Before pushing, confirm:

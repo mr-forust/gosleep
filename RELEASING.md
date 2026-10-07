@@ -22,7 +22,7 @@ git remote set-url --push origin ssh://git@gitssh.forust.xyz:2221/forust/gosleep
 HTTPS remote URL:
 
 ```text
-https://gitea.forust.xyz/forust/gosleep.git
+https://git.forust.xyz/forust/gosleep.git
 ```
 
 ## Gitea Actions Setup
@@ -63,6 +63,7 @@ cargo fmt --check
 cargo test --locked
 cargo clippy --locked -- -D warnings
 cargo build --release --locked
+test "$(cat VERSION)" = "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
 ```
 
 ## Create Release
@@ -77,12 +78,13 @@ git push origin "v${version}"
 
 The `.gitea/workflows/release.yaml` workflow will:
 
-1. Re-run release gates: `cargo fmt --check`, `cargo test --locked`, `cargo clippy --locked -- -D warnings`, and YAML lint.
-2. Build `target/release/gosleep-timer`.
-3. Copy binary as `gosleep-timer-<version>-linux-amd64`.
-4. Generate a SHA-256 checksum.
-5. Create a Gitea release.
-6. Upload the binary and checksum as release assets.
+1. Check that the tag, `VERSION`, and Cargo package version match.
+2. Re-run release gates: `cargo fmt --check`, `cargo test --locked`, `cargo clippy --locked -- -D warnings`, and YAML lint.
+3. Build `target/release/gosleep-timer`.
+4. Copy binary as `gosleep-timer-<version>-linux-amd64`.
+5. Generate a SHA-256 checksum.
+6. Create a Gitea release.
+7. Upload the binary and checksum as release assets.
 
 The workflow is idempotent: if the release already exists, it reuses it and replaces assets with matching names.
 If any lint or test step fails, the build and release job will not run.

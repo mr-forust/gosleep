@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 
 The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`.
 
+## [Unreleased]
+
+### Fixed
+
+- Reject durations that overflow or round down to zero instead of panicking.
+- Report a stopped timer when the user stops during post-countdown actions.
+- Fail `auto` actions when no supported desktop backend is available.
+- Stop mapping GNOME monitor power-off to a session lock.
+- Save config paths that use a filename in the current directory.
+
+### Changed
+
+- CI checks that `VERSION` matches the Cargo package version.
+- Release workflow checks that the release tag matches both version files.
+- Limit release write permission to the asset-publishing job.
+
 ## [1.3.3] - 2026-09-09
 
 ### Fixed
@@ -102,12 +118,12 @@ The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`
 - Added YAML configuration, CLI `init`, `preview`, and `run` commands.
 - Added Gitea CI and tag-based release workflows.
 
-[1.3.3]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.3.3
-[1.3.2]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.3.2
-[1.3.1]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.3.1
-[1.2.2]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.2.2
-[1.2.1]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.2.1
-[1.2.0]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.2.0
-[1.1.3]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.1.3
-[1.1.2]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.1.2
-[1.1.1]: https://gitea.forust.xyz/forust/gosleep/releases/tag/v1.1.1
+[1.3.3]: https://git.forust.xyz/forust/gosleep/releases/tag/v1.3.3
+[1.3.2]: https://git.forust.xyz/forust/gosleep/releases/tag/v1.3.2
+[1.3.1]: https://git.forust.xyz/forust/gosleep/releases/tag/v1.3.1
+[1.2.2]: https://git.forust.xyz/forust/gosleep/releases/tag/v1.2.2
+[1.2.1]: https://git.forust.xyz/forust/gosleep/releases/tag/v1.2.1
+[1.2.0]: https://git.forust.xyz/forust/gosleep/releases/tag/v1.2.0
+[1.1.3]: https://git.forust.xyz/forust/gosleep/releases/tag/v1.1.3
+[1.1.2]: https://git.forust.xyz/forust/gosleep/releases/tag/v1.1.2
+[1.1.1]: https://git.forust.xyz/forust/gosleep/releases/tag/v1.1.1

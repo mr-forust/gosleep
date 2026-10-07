@@ -7,14 +7,28 @@ name: release
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   verify:
     runs-on: [self-hosted, linux, arch, homelab]
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check release tag and version files
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF##*/}"
+          metadata="$(cargo metadata --no-deps --format-version 1)"
+          package_version="$(jq -r '.packages[] | select(.name == "gosleep-timer") | .version' <<< "$metadata")"
+          test -n "$package_version"
+          test "$(cat VERSION)" = "$package_version"
+          test "$tag" = "v${package_version}"
 
       - name: Check formatting
         shell: bash
@@ -40,11 +54,16 @@ jobs:
   linux-amd64:
     needs: verify
     runs-on: [self-hosted, linux, arch, homelab]
+    timeout-minutes: 30
+    permissions:
+      contents: write
     env:
       GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Build release binary
         shell: bash
@@ -66,7 +85,7 @@ jobs:
         shell: bash
         run: |
           tag="${GITHUB_REF##*/}"
-          release_url="https://gitea.forust.xyz/api/v1/repos/forust/gosleep/releases"
+          release_url="https://git.forust.xyz/api/v1/repos/forust/gosleep/releases"
           existing="$(curl -fsS \
             "${release_url}/tags/${tag}" \
             -H "Authorization: token ${GITEA_TOKEN}")" || existing='{}'
@@ -99,7 +118,7 @@ jobs:
       - name: Upload Gitea release assets
         shell: bash
         run: |
-          release_url="https://gitea.forust.xyz/api/v1/repos/forust/gosleep/releases"
+          release_url="https://git.forust.xyz/api/v1/repos/forust/gosleep/releases"
           release_id="${{ steps.release.outputs.release_id }}"
           for asset in dist/gosleep-timer-*; do
             name="$(basename "$asset")"

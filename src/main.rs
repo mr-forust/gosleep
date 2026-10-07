@@ -439,7 +439,9 @@ fn save_config(path: &Path, config: &Config) -> Result<()> {
     let mut config = config.clone();
     normalize_config(&mut config);
     validate_config(&config)?;
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let data = noyalib::to_string(&config).context("serialize config")?;
@@ -618,7 +620,7 @@ fn validate_config(config: &Config) -> Result<()> {
         backend => bail!("invalid workspace backend {backend:?}"),
     }
     match config.actions.monitor.backend.as_str() {
-        "auto" | "hyprland" | "niri" | "sway" | "kde" | "gnome" | "x11" => {}
+        "auto" | "hyprland" | "niri" | "sway" | "kde" | "x11" => {}
         backend => bail!("invalid monitor backend {backend:?}"),
     }
     match config.actions.lock.backend.as_str() {
@@ -650,6 +652,9 @@ fn parse_duration(value: &str) -> Result<Duration> {
             bail!("invalid duration {value:?}");
         }
         let number: f64 = chars[start..index].iter().collect::<String>().parse()?;
+        if !number.is_finite() {
+            bail!("duration component must be finite");
+        }
 
         let unit_start = index;
         while index < chars.len() && !chars[index].is_ascii_digit() && chars[index] != '.' {
@@ -666,12 +671,19 @@ fn parse_duration(value: &str) -> Result<Duration> {
             _ => bail!("invalid duration unit {unit:?}"),
         };
         total += number * multiplier;
+        if !total.is_finite() {
+            bail!("duration is too large");
+        }
     }
 
     if total <= 0.0 {
         bail!("duration must be greater than zero");
     }
-    Ok(Duration::from_secs_f64(total))
+    let duration = Duration::try_from_secs_f64(total).context("duration is too large")?;
+    if duration.is_zero() {
+        bail!("duration must be greater than zero");
+    }
+    Ok(duration)
 }
 
 fn build_action_commands(config: &Config) -> Vec<ActionCommand> {
@@ -849,7 +861,7 @@ fn workspace_command(action: &WorkspaceAction) -> ActionCommand {
             label: "workspace",
             args: vec![],
             shell: Some(format!(
-                "if command -v niri >/dev/null 2>&1; then niri msg action focus-workspace {0}; elif command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch workspace {0}; elif command -v swaymsg >/dev/null 2>&1; then swaymsg workspace number {0}; elif command -v i3-msg >/dev/null 2>&1; then i3-msg workspace number {0}; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.KWin /KWin org.kde.KWin.setCurrentDesktop {0}; fi",
+                "if command -v niri >/dev/null 2>&1; then niri msg action focus-workspace {0}; elif command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch workspace {0}; elif command -v swaymsg >/dev/null 2>&1; then swaymsg workspace number {0}; elif command -v i3-msg >/dev/null 2>&1; then i3-msg workspace number {0}; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.KWin /KWin org.kde.KWin.setCurrentDesktop {0}; else echo 'no supported workspace backend found' >&2; exit 127; fi",
                 number
             )),
         },
@@ -897,11 +909,6 @@ fn monitor_command(action: &MonitorAction) -> ActionCommand {
                 .collect(),
             shell: None,
         },
-        "gnome" => ActionCommand {
-            label: "monitor",
-            args: vec![],
-            shell: Some("gnome-screensaver-command -l".to_string()),
-        },
         "x11" => ActionCommand {
             label: "monitor",
             args: vec![],
@@ -911,7 +918,7 @@ fn monitor_command(action: &MonitorAction) -> ActionCommand {
             label: "monitor",
             args: vec![],
             shell: Some(
-                "if command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch dpms off; elif command -v niri >/dev/null 2>&1; then niri msg action power-off-monitors; elif command -v swaymsg >/dev/null 2>&1; then swaymsg output '*' dpms off; elif command -v kscreen-doctor >/dev/null 2>&1; then kscreen-doctor --dpms off; elif command -v gnome-screensaver-command >/dev/null 2>&1; then gnome-screensaver-command -l; elif command -v xset >/dev/null 2>&1; then xset dpms force off; fi".to_string()
+                "if command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch dpms off; elif command -v niri >/dev/null 2>&1; then niri msg action power-off-monitors; elif command -v swaymsg >/dev/null 2>&1; then swaymsg output '*' dpms off; elif command -v kscreen-doctor >/dev/null 2>&1; then kscreen-doctor --dpms off; elif command -v xset >/dev/null 2>&1; then xset dpms force off; else echo 'no supported monitor power-off backend found' >&2; exit 127; fi".to_string()
             ),
         },
     }
@@ -971,7 +978,7 @@ fn lock_command(action: &LockAction) -> ActionCommand {
             label: "lock",
             args: vec![],
             shell: Some(
-                "if command -v loginctl >/dev/null 2>&1; then loginctl lock-session; elif command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch exec hyprlock; elif command -v swaylock >/dev/null 2>&1; then swaylock; elif command -v i3lock >/dev/null 2>&1; then i3lock; elif command -v gnome-screensaver-command >/dev/null 2>&1; then gnome-screensaver-command -l; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.ScreenSaver /ScreenSaver org.freedesktop.ScreenSaver.SetActive true; elif command -v xscreensaver-command >/dev/null 2>&1; then xscreensaver-command -lock; fi".to_string()
+                "if command -v loginctl >/dev/null 2>&1; then loginctl lock-session; elif command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch exec hyprlock; elif command -v swaylock >/dev/null 2>&1; then swaylock; elif command -v i3lock >/dev/null 2>&1; then i3lock; elif command -v gnome-screensaver-command >/dev/null 2>&1; then gnome-screensaver-command -l; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.ScreenSaver /ScreenSaver org.freedesktop.ScreenSaver.SetActive true; elif command -v xscreensaver-command >/dev/null 2>&1; then xscreensaver-command -lock; else echo 'no supported lock backend found' >&2; exit 127; fi".to_string()
             ),
         },
     }
@@ -1082,7 +1089,7 @@ fn run_timer(
     }
 
     if let Some(output) = output.as_deref_mut() {
-        write_timer_line(output, "finished")?;
+        write_timer_line(output, "countdown finished")?;
     }
     let mut failures = Vec::new();
     let actions = if options.no_actions {
@@ -1107,6 +1114,9 @@ fn run_timer(
         if let Err(err) = run_command(command, mode) {
             failures.push(format!("{} failed: {err}", command.label));
         }
+    }
+    if stop.load(Ordering::Relaxed) {
+        bail!(TIMER_STOPPED_MSG);
     }
     let report = TimerReport {
         started_at,
@@ -1947,7 +1957,7 @@ const FIELDS: &[Field] = &[
     Field {
         label: "screen poweroff backend",
         key: FieldKey::MonitorBackend,
-        kind: FieldKind::Cycle(&["auto", "hyprland", "niri", "sway", "kde", "gnome", "x11"]),
+        kind: FieldKind::Cycle(&["auto", "hyprland", "niri", "sway", "kde", "x11"]),
     },
     Field {
         label: "screen poweroff command",
@@ -2290,6 +2300,35 @@ mod tests {
         assert!(parse_duration("1ns").is_ok());
         assert!(parse_duration("bad").is_err());
         assert!(parse_duration("0s").is_err());
+    }
+
+    #[test]
+    fn parse_duration_rejects_overflow_and_rounds_that_become_zero() {
+        assert!(parse_duration(
+            "999999999999999999999999999999999999999999999999999999999999999999999999999999999999999h"
+        )
+        .is_err());
+        assert!(parse_duration("0.0000000001ns").is_err());
+    }
+
+    #[test]
+    fn auto_backends_fail_when_no_supported_command_exists() {
+        let workspace = workspace_command(&WorkspaceAction {
+            backend: "auto".to_string(),
+            ..WorkspaceAction::default()
+        });
+        let monitor = monitor_command(&MonitorAction {
+            backend: "auto".to_string(),
+            ..MonitorAction::default()
+        });
+        let lock = lock_command(&LockAction {
+            backend: "auto".to_string(),
+            ..LockAction::default()
+        });
+
+        for command in [workspace, monitor, lock] {
+            assert!(command.display().contains("exit 127"));
+        }
     }
 
     #[test]
