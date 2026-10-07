@@ -20,6 +20,10 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install Rust stable toolchain
+        shell: bash
+        run: bash .gitea/workflows/install-rust.sh
+
       - name: Cache Cargo registry and build
         uses: actions/cache@v4
         with:

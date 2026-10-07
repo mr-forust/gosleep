@@ -17,6 +17,7 @@ The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`
 ### Changed
 
 - CI checks that `VERSION` matches the Cargo package version.
+- CI installs the stable Rust toolchain when the runner has no Cargo.
 - Release workflow checks that the release tag matches both version files.
 - Limit release write permission to the asset-publishing job.
 
