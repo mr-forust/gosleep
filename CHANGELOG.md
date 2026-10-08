@@ -34,6 +34,7 @@ The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`
 - Release workflow checks that the release tag matches both version files.
 - Limit release write permission to the asset-publishing job.
 - Install Rust in the release build job and run YAML lint in a separate host job.
+- Reuse the Cargo cache for release checks and builds.
 - Run the local timezone transition test in CI and before release.
 
 ## [1.3.3] - 2026-09-09

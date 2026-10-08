@@ -25,6 +25,16 @@ jobs:
         shell: bash
         run: bash .gitea/workflows/install-rust.sh
 
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: >-
+            cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml') }}
+
       - name: Check release tag and version files
         shell: bash
         run: |
@@ -96,6 +106,16 @@ jobs:
       - name: Install Rust stable toolchain
         shell: bash
         run: bash .gitea/workflows/install-rust.sh
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: >-
+            cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml') }}
 
       - name: Build release binary
         shell: bash
