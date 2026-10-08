@@ -52,6 +52,12 @@ jobs:
         shell: bash
         run: cargo test --locked
 
+      - name: Check local clock transitions
+        shell: bash
+        run: |
+          TZ=Europe/Bratislava cargo test --locked \
+            local_deadlines_handle_daylight_saving_transitions -- --ignored
+
       - name: Run clippy
         shell: bash
         run: cargo clippy --locked -- -D warnings

@@ -6,6 +6,15 @@ The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-08
+
+### Added
+
+- Group TUI settings and add 30-minute, 1-hour, and 2-hour duration presets.
+- Set a TUI timer for the next local clock time with `HH:MM` input.
+- Show an ordered action plan and a scrollable log of action results.
+- Add cursor movement and deletion when editing text.
+
 ### Fixed
 
 - Reject durations that overflow or round down to zero instead of panicking.
@@ -16,10 +25,16 @@ The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`
 
 ### Changed
 
+- Pair action descriptions and shell commands in aligned columns with distinct colors.
+- Show idle status and estimated local end time while counting down.
+- Use a compact countdown in terminals that cannot fit large digits.
+- Reject invalid duration and brightness edits without changing the config.
 - CI checks that `VERSION` matches the Cargo package version.
 - CI runs Rust checks in a pinned container with the action runtime and C linker.
 - Release workflow checks that the release tag matches both version files.
 - Limit release write permission to the asset-publishing job.
+- Install Rust in the release build job and run YAML lint in a separate host job.
+- Run the local timezone transition test in CI and before release.
 
 ## [1.3.3] - 2026-09-09
 

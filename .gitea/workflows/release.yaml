@@ -43,9 +43,24 @@ jobs:
         shell: bash
         run: cargo test --locked
 
+      - name: Check local clock transitions
+        shell: bash
+        run: |
+          TZ=Europe/Bratislava cargo test --locked \
+            local_deadlines_handle_daylight_saving_transitions -- --ignored
+
       - name: Run clippy
         shell: bash
         run: cargo clippy --locked -- -D warnings
+
+  lint-yaml:
+    runs-on: [self-hosted, linux, arch, homelab]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Lint YAML
         shell: bash
@@ -57,7 +72,7 @@ jobs:
             -c .yamllint .
 
   linux-amd64:
-    needs: verify
+    needs: [verify, lint-yaml]
     runs-on: [self-hosted, linux, arch, homelab]
     timeout-minutes: 30
     container:
@@ -77,6 +92,10 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends curl jq
+
+      - name: Install Rust stable toolchain
+        shell: bash
+        run: bash .gitea/workflows/install-rust.sh
 
       - name: Build release binary
         shell: bash

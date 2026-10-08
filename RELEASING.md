@@ -73,8 +73,8 @@ git push origin "v${version}"
 The `.gitea/workflows/release.yaml` workflow will:
 
 1. Check that the tag, `VERSION`, and Cargo package version match.
-2. Re-run release gates: `cargo fmt --check`, `cargo test --locked`, `cargo clippy --locked -- -D warnings`, and YAML lint.
-3. Build `target/release/gosleep-timer`.
+2. Re-run release gates: formatting, locked tests, local clock transition tests, clippy, and YAML lint. Rust runs in the pinned Node container. YAML lint runs in a separate host job.
+3. Install the Rust toolchain in the build job and build `target/release/gosleep-timer`.
 4. Copy binary as `gosleep-timer-<version>-linux-amd64`.
 5. Generate a SHA-256 checksum.
 6. Create a Gitea release.
