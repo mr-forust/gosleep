@@ -7,20 +7,42 @@ name: ci
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   rust:
     runs-on: [self-hosted, linux, arch, homelab]
+    timeout-minutes: 30
+    container:
+      image: node:22.23.3-bookworm
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable toolchain
+        shell: bash
+        run: bash .gitea/workflows/install-rust.sh
 
       - name: Cache Cargo registry and build
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
+            ~/.cargo/git
             target
-          key: cargo-${{ hashFiles('Cargo.lock') }}
+          key: >-
+            cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Check version consistency
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          test -n "$package_version"
+          test "$(cat VERSION)" = "$package_version"
 
       - name: Check formatting
         shell: bash
@@ -29,6 +51,12 @@ jobs:
       - name: Run tests
         shell: bash
         run: cargo test --locked
+
+      - name: Check local clock transitions
+        shell: bash
+        run: |
+          TZ=Europe/Bratislava cargo test --locked \
+            local_deadlines_handle_daylight_saving_transitions -- --ignored
 
       - name: Run clippy
         shell: bash
@@ -40,9 +68,12 @@ jobs:
 
   lint-yaml:
     runs-on: [self-hosted, linux, arch, homelab]
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Lint YAML
         shell: bash

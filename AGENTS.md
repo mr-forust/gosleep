@@ -27,6 +27,12 @@ cargo clippy --locked -- -D warnings
 cargo build --release --locked
 ```
 
+The local timezone transition test requires an explicit timezone. Run it when changing clock target behavior:
+
+```bash
+env TZ=Europe/Bratislava cargo test --locked local_deadlines_handle_daylight_saving_transitions -- --ignored
+```
+
 Run YAML lint when editing workflow or YAML files:
 
 ```bash
@@ -102,7 +108,7 @@ origin ssh://git@gitssh.forust.xyz:2221/forust/gosleep.git
 HTTPS remote URL:
 
 ```text
-https://gitea.forust.xyz/forust/gosleep.git
+https://git.forust.xyz/forust/gosleep.git
 ```
 
 Before pushing, confirm:
@@ -133,6 +139,18 @@ For layout changes, check both:
 - wide terminal behavior, where settings and preview are side by side
 
 Avoid truncating command previews without a visible indication. Preview wrapping is expected behavior.
+
+- Settings groups are Timer, Audio, Screen, Session, and More. Keep `Tab` and `Shift+Tab` navigation consistent.
+- Keep the minimum size of 36x20 usable. Check compact countdown rendering and preview scrolling at this size.
+- Keep action descriptions and shell commands in aligned columns. Wrap each column independently and use distinct colors. Preserve red warnings for dangerous actions.
+- Keep preview and result line counts visible when content needs scrolling.
+- Check text editing with Unicode, cursor movement, deletion, apply, and cancel. Invalid input must preserve the previous config value.
+- Duration presets must not start a timer. Numeric keys must insert text while editing.
+- The `until local time` target is TUI session state. Do not save it as a duration or add it to YAML without an explicit configuration change.
+- Resolve clock targets at start in the local timezone. Check tomorrow, midnight, and daylight saving clock changes. Pausing extends the countdown.
+- Send action results from the timer worker to the UI. Never let child output write over the TUI.
+- Use Ratatui TestBackend for deterministic layout checks. Use isolated config and history paths for runtime checks.
+- Update the README key table and behavior notes when TUI controls change.
 
 ## Safety
 

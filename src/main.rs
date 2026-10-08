@@ -6,6 +6,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -14,6 +15,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 const TIMER_STOPPED_MSG: &str = "timer stopped";
+use chrono::{DateTime, Local, NaiveTime, TimeZone};
 use clap::{Parser, Subcommand};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -439,7 +441,9 @@ fn save_config(path: &Path, config: &Config) -> Result<()> {
     let mut config = config.clone();
     normalize_config(&mut config);
     validate_config(&config)?;
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let data = noyalib::to_string(&config).context("serialize config")?;
@@ -618,7 +622,7 @@ fn validate_config(config: &Config) -> Result<()> {
         backend => bail!("invalid workspace backend {backend:?}"),
     }
     match config.actions.monitor.backend.as_str() {
-        "auto" | "hyprland" | "niri" | "sway" | "kde" | "gnome" | "x11" => {}
+        "auto" | "hyprland" | "niri" | "sway" | "kde" | "x11" => {}
         backend => bail!("invalid monitor backend {backend:?}"),
     }
     match config.actions.lock.backend.as_str() {
@@ -650,6 +654,9 @@ fn parse_duration(value: &str) -> Result<Duration> {
             bail!("invalid duration {value:?}");
         }
         let number: f64 = chars[start..index].iter().collect::<String>().parse()?;
+        if !number.is_finite() {
+            bail!("duration component must be finite");
+        }
 
         let unit_start = index;
         while index < chars.len() && !chars[index].is_ascii_digit() && chars[index] != '.' {
@@ -666,12 +673,19 @@ fn parse_duration(value: &str) -> Result<Duration> {
             _ => bail!("invalid duration unit {unit:?}"),
         };
         total += number * multiplier;
+        if !total.is_finite() {
+            bail!("duration is too large");
+        }
     }
 
     if total <= 0.0 {
         bail!("duration must be greater than zero");
     }
-    Ok(Duration::from_secs_f64(total))
+    let duration = Duration::try_from_secs_f64(total).context("duration is too large")?;
+    if duration.is_zero() {
+        bail!("duration must be greater than zero");
+    }
+    Ok(duration)
 }
 
 fn build_action_commands(config: &Config) -> Vec<ActionCommand> {
@@ -849,7 +863,7 @@ fn workspace_command(action: &WorkspaceAction) -> ActionCommand {
             label: "workspace",
             args: vec![],
             shell: Some(format!(
-                "if command -v niri >/dev/null 2>&1; then niri msg action focus-workspace {0}; elif command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch workspace {0}; elif command -v swaymsg >/dev/null 2>&1; then swaymsg workspace number {0}; elif command -v i3-msg >/dev/null 2>&1; then i3-msg workspace number {0}; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.KWin /KWin org.kde.KWin.setCurrentDesktop {0}; fi",
+                "if command -v niri >/dev/null 2>&1; then niri msg action focus-workspace {0}; elif command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch workspace {0}; elif command -v swaymsg >/dev/null 2>&1; then swaymsg workspace number {0}; elif command -v i3-msg >/dev/null 2>&1; then i3-msg workspace number {0}; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.KWin /KWin org.kde.KWin.setCurrentDesktop {0}; else echo 'no supported workspace backend found' >&2; exit 127; fi",
                 number
             )),
         },
@@ -897,11 +911,6 @@ fn monitor_command(action: &MonitorAction) -> ActionCommand {
                 .collect(),
             shell: None,
         },
-        "gnome" => ActionCommand {
-            label: "monitor",
-            args: vec![],
-            shell: Some("gnome-screensaver-command -l".to_string()),
-        },
         "x11" => ActionCommand {
             label: "monitor",
             args: vec![],
@@ -911,7 +920,7 @@ fn monitor_command(action: &MonitorAction) -> ActionCommand {
             label: "monitor",
             args: vec![],
             shell: Some(
-                "if command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch dpms off; elif command -v niri >/dev/null 2>&1; then niri msg action power-off-monitors; elif command -v swaymsg >/dev/null 2>&1; then swaymsg output '*' dpms off; elif command -v kscreen-doctor >/dev/null 2>&1; then kscreen-doctor --dpms off; elif command -v gnome-screensaver-command >/dev/null 2>&1; then gnome-screensaver-command -l; elif command -v xset >/dev/null 2>&1; then xset dpms force off; fi".to_string()
+                "if command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch dpms off; elif command -v niri >/dev/null 2>&1; then niri msg action power-off-monitors; elif command -v swaymsg >/dev/null 2>&1; then swaymsg output '*' dpms off; elif command -v kscreen-doctor >/dev/null 2>&1; then kscreen-doctor --dpms off; elif command -v xset >/dev/null 2>&1; then xset dpms force off; else echo 'no supported monitor power-off backend found' >&2; exit 127; fi".to_string()
             ),
         },
     }
@@ -971,7 +980,7 @@ fn lock_command(action: &LockAction) -> ActionCommand {
             label: "lock",
             args: vec![],
             shell: Some(
-                "if command -v loginctl >/dev/null 2>&1; then loginctl lock-session; elif command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch exec hyprlock; elif command -v swaylock >/dev/null 2>&1; then swaylock; elif command -v i3lock >/dev/null 2>&1; then i3lock; elif command -v gnome-screensaver-command >/dev/null 2>&1; then gnome-screensaver-command -l; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.ScreenSaver /ScreenSaver org.freedesktop.ScreenSaver.SetActive true; elif command -v xscreensaver-command >/dev/null 2>&1; then xscreensaver-command -lock; fi".to_string()
+                "if command -v loginctl >/dev/null 2>&1; then loginctl lock-session; elif command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch exec hyprlock; elif command -v swaylock >/dev/null 2>&1; then swaylock; elif command -v i3lock >/dev/null 2>&1; then i3lock; elif command -v gnome-screensaver-command >/dev/null 2>&1; then gnome-screensaver-command -l; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.ScreenSaver /ScreenSaver org.freedesktop.ScreenSaver.SetActive true; elif command -v xscreensaver-command >/dev/null 2>&1; then xscreensaver-command -lock; else echo 'no supported lock backend found' >&2; exit 127; fi".to_string()
             ),
         },
     }
@@ -1064,7 +1073,9 @@ fn run_timer(
         if remaining.is_zero() {
             break;
         }
-        if let Some(output) = output.as_deref_mut() {
+        if mode == RunMode::Cli
+            && let Some(output) = output.as_deref_mut()
+        {
             write_timer_progress(
                 output,
                 &format!("remaining: {}", format_duration(remaining)),
@@ -1082,7 +1093,7 @@ fn run_timer(
     }
 
     if let Some(output) = output.as_deref_mut() {
-        write_timer_line(output, "finished")?;
+        write_timer_line(output, "countdown finished")?;
     }
     let mut failures = Vec::new();
     let actions = if options.no_actions {
@@ -1105,8 +1116,17 @@ fn run_timer(
             continue;
         }
         if let Err(err) = run_command(command, mode) {
-            failures.push(format!("{} failed: {err}", command.label));
+            let failure = format!("{} failed: {err}", command.label);
+            if let Some(output) = output.as_deref_mut() {
+                write_timer_line(output, &failure)?;
+            }
+            failures.push(failure);
+        } else if let Some(output) = output.as_deref_mut() {
+            write_timer_line(output, &format!("{}: done", command.label))?;
         }
+    }
+    if stop.load(Ordering::Relaxed) {
+        bail!(TIMER_STOPPED_MSG);
     }
     let report = TimerReport {
         started_at,
@@ -1168,6 +1188,124 @@ fn run_tui(path: PathBuf, config: Config) -> Result<()> {
     result
 }
 
+// Only complete lines cross into the UI thread. Command output stays off the terminal.
+struct UpdateWriter {
+    sender: mpsc::Sender<String>,
+    pending: String,
+}
+
+impl Write for UpdateWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.pending.push_str(&String::from_utf8_lossy(bytes));
+        while let Some(end) = self.pending.find('\n') {
+            let line = self.pending.drain(..=end).collect::<String>();
+            let _ = self.sender.send(line.trim_end().to_string());
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+const GROUPS: &[&str] = &["Timer", "Audio", "Screen", "Session", "More"];
+
+fn field_group(key: FieldKey) -> usize {
+    match key {
+        FieldKey::Duration | FieldKey::UntilTime | FieldKey::InhibitSleep => 0,
+        FieldKey::MediaEnabled
+        | FieldKey::MediaAction
+        | FieldKey::MuteEnabled
+        | FieldKey::MuteInputEnabled => 1,
+        FieldKey::BrightnessEnabled
+        | FieldKey::BrightnessValue
+        | FieldKey::MonitorEnabled
+        | FieldKey::MonitorBackend
+        | FieldKey::MonitorCommand => 2,
+        FieldKey::WorkspaceEnabled
+        | FieldKey::WorkspaceBackend
+        | FieldKey::WorkspaceNumber
+        | FieldKey::WorkspaceCommand
+        | FieldKey::LockEnabled
+        | FieldKey::LockBackend
+        | FieldKey::LockCommand => 3,
+        _ => 4,
+    }
+}
+
+fn field_hint(field: Field) -> &'static str {
+    match field.key {
+        FieldKey::Duration => "Duration: 30m, 1h30m, 90s; clears until time",
+        FieldKey::UntilTime => "HH:MM local time; next occurrence; blank clears",
+        FieldKey::BrightnessValue => "Brightness: 0..100 percent",
+        FieldKey::WorkspaceNumber => "Workspace number: integer",
+        FieldKey::InhibitSleep => "Keep system awake while timer runs",
+        FieldKey::PowerMode => "System action after countdown",
+        _ => match field.kind {
+            FieldKind::Bool => "Space or Enter switches on/off",
+            FieldKind::Cycle(_) => "Space or Enter selects the next option",
+            FieldKind::Csv => "Separate process names with commas",
+            FieldKind::Semi => "Separate shell commands with semicolons",
+            _ => "Text: Enter applies; Esc discards the edit",
+        },
+    }
+}
+
+fn action_description(command: &ActionCommand, config: &Config) -> String {
+    match command.label {
+        "workspace" => format!("Switch to workspace {}", config.actions.workspace.number),
+        "media" => format!("Media: {}", config.actions.media.action),
+        "brightness" => format!("Set brightness to {}%", config.actions.brightness.value),
+        "mute" => "Mute speakers".to_string(),
+        "mute_input" => "Mute microphone".to_string(),
+        "monitor" => "Turn off monitors".to_string(),
+        "lock" => "Lock session".to_string(),
+        "notify" => "Send notification".to_string(),
+        "kill" => "Stop matching processes".to_string(),
+        "power" => format!("System: {}", config.actions.power.mode),
+        "custom" => "Run custom shell command".to_string(),
+        label => label.to_string(),
+    }
+}
+
+fn parse_clock_time(value: &str) -> Result<NaiveTime> {
+    let value = value.trim();
+    if value.len() != 5 || value.as_bytes().get(2).is_none_or(|ch| *ch != b':') {
+        bail!("expected local time HH:MM (00:00..23:59)");
+    }
+    NaiveTime::parse_from_str(value, "%H:%M").context("expected local time HH:MM (00:00..23:59)")
+}
+
+fn duration_until<T: TimeZone>(time: NaiveTime, now: DateTime<T>) -> Result<Duration> {
+    let zone = now.timezone();
+    for day in 0..=1 {
+        let date = now
+            .date_naive()
+            .checked_add_days(chrono::Days::new(day))
+            .context("date outside calendar range")?;
+        let local = date.and_time(time);
+        let resolved = zone.from_local_datetime(&local);
+        let missing = matches!(resolved, chrono::LocalResult::None);
+        if let Some(target) = [resolved.clone().earliest(), resolved.latest()]
+            .into_iter()
+            .flatten()
+            .filter(|target| target > &now)
+            .min_by_key(|target| target.timestamp())
+        {
+            return (target - now)
+                .to_std()
+                .context("end time must be in the future");
+        }
+        if missing && local > now.naive_local() {
+            bail!(
+                "that local time does not exist on {date} due to a clock change; choose another time"
+            );
+        }
+    }
+    bail!("cannot resolve the next local end time")
+}
+
 struct App {
     path: PathBuf,
     config: Config,
@@ -1176,6 +1314,11 @@ struct App {
     status: String,
     timer: Option<TimerState>,
     edit: Option<EditState>,
+    group: usize,
+    until: Option<NaiveTime>,
+    preview_offset: usize,
+    show_log: bool,
+    action_log: Vec<String>,
 }
 
 struct TimerState {
@@ -1184,11 +1327,42 @@ struct TimerState {
     pause: Arc<AtomicBool>,
     remaining_ms: Arc<AtomicU64>,
     handle: thread::JoinHandle<Result<TimerReport>>,
+    updates: mpsc::Receiver<String>,
 }
 
 struct EditState {
     field: Field,
     value: String,
+    cursor: usize,
+}
+
+fn edit_view(edit: &EditState, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "▌".to_string();
+    }
+    let mut start = 0;
+    while Line::from(&edit.value[start..edit.cursor]).width() + 1 + usize::from(start > 0) > width {
+        start += edit.value[start..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(0);
+    }
+    let mut view = format!(
+        "{}{}▌",
+        if start > 0 { "‹" } else { "" },
+        &edit.value[start..edit.cursor]
+    );
+    for ch in edit.value[edit.cursor..].chars() {
+        if Line::from(format!("{view}{ch}")).width() > width {
+            break;
+        }
+        view.push(ch);
+    }
+    view
 }
 
 impl App {
@@ -1201,6 +1375,11 @@ impl App {
             offset: 0,
             timer: None,
             edit: None,
+            group: 0,
+            until: None,
+            preview_offset: 0,
+            show_log: false,
+            action_log: Vec::new(),
         }
     }
 
@@ -1215,14 +1394,14 @@ impl App {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.stop_timer();
+                    return Ok(());
+                }
                 if self.edit.is_some() {
                     self.handle_edit_key(key.code);
                 } else {
                     match key.code {
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.stop_timer();
-                            return Ok(());
-                        }
                         KeyCode::Char('q') | KeyCode::Esc => {
                             self.stop_timer();
                             return Ok(());
@@ -1234,7 +1413,24 @@ impl App {
                             let last = self.visible_fields().len().saturating_sub(1);
                             self.focus = (self.focus + 1).min(last);
                         }
-                        KeyCode::Char(' ') | KeyCode::Enter => self.activate()?,
+                        KeyCode::Tab => self.change_group(1),
+                        KeyCode::BackTab => self.change_group(GROUPS.len() - 1),
+                        KeyCode::Char('1') => self.set_preset("30m"),
+                        KeyCode::Char('2') => self.set_preset("1h"),
+                        KeyCode::Char('3') => self.set_preset("2h"),
+                        KeyCode::Char('l') => {
+                            self.show_log = !self.show_log;
+                            self.preview_offset = 0;
+                        }
+                        KeyCode::PageDown => {
+                            self.preview_offset = self.preview_offset.saturating_add(3)
+                        }
+                        KeyCode::PageUp => {
+                            self.preview_offset = self.preview_offset.saturating_sub(3)
+                        }
+                        KeyCode::Char(' ') | KeyCode::Enter if self.timer.is_none() => {
+                            self.activate()?
+                        }
                         KeyCode::Char('s') => self.save(),
                         KeyCode::Char('r') => self.start_timer(),
                         KeyCode::Char('p') => self.toggle_pause(),
@@ -1248,8 +1444,8 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        if area.width < 36 || area.height < 11 {
-            frame.render_widget(Paragraph::new("terminal too small"), area);
+        if area.width < 36 || area.height < 20 {
+            frame.render_widget(Paragraph::new("terminal too small (need 36x20)"), area);
             return;
         }
         if self.timer.is_some() {
@@ -1262,16 +1458,44 @@ impl App {
             .constraints([
                 Constraint::Length(4),
                 Constraint::Min(5),
-                Constraint::Length(1),
+                Constraint::Length(3),
             ])
             .split(area);
 
         self.draw_header(frame, chunks[0]);
         self.draw_body(frame, chunks[1]);
-        let footer = if self.edit.is_some() {
-            "enter apply | esc cancel".to_string()
+        let footer = if let Some(edit) = &self.edit {
+            format!(
+                "Editing {} | {}\nEnter apply | Esc cancel | Left/Right move | Home/End",
+                edit.field.label,
+                field_hint(edit.field)
+            )
         } else {
-            "space/enter edit-toggle | r run | p pause | x stop | s save | q quit".to_string()
+            let action = self
+                .focused_field()
+                .map(|field| match field.kind {
+                    FieldKind::Bool => "Space toggle",
+                    FieldKind::Cycle(_) => "Enter next value",
+                    _ => "Enter edit",
+                })
+                .unwrap_or("Enter edit");
+            format!(
+                "Tab group | {action} | r run | s save | q quit\n1 30m | 2 1h | 3 2h | l preview/results | PgUp/PgDn scroll\n{}",
+                self.focused_field().map(field_hint).unwrap_or("")
+            )
+        };
+        let footer = if area.width < 75 {
+            if let Some(edit) = &self.edit {
+                format!(
+                    "Editing: {}\nEnter apply | Esc cancel\nLeft/Right Home/End | Backspace/Del",
+                    edit.field.label
+                )
+            } else {
+                "Tab group | Enter edit | r run\n1/2/3 presets | l log | PgUp/PgDn\ns save | q quit"
+                    .to_string()
+            }
+        } else {
+            footer
         };
         frame.render_widget(
             Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
@@ -1279,90 +1503,100 @@ impl App {
         );
     }
 
-    fn draw_running(&self, frame: &mut Frame, area: Rect) {
+    fn draw_running(&mut self, frame: &mut Frame, area: Rect) {
         let (_, remaining, progress) = self.timer_snapshot();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(1),
-                Constraint::Length(10),
-                Constraint::Min(1),
                 Constraint::Length(2),
-                Constraint::Length(7),
+                Constraint::Min(3),
                 Constraint::Length(1),
+                Constraint::Length(8),
+                Constraint::Length(2),
             ])
             .split(area);
 
-        let time_lines = ascii_time(&format_compact_duration(remaining))
+        let paused = self
+            .timer
+            .as_ref()
+            .is_some_and(|timer| timer.pause.load(Ordering::Relaxed));
+        let state = if remaining.is_zero() {
+            "running actions"
+        } else if paused {
+            "paused"
+        } else {
+            "running"
+        };
+        let end = chrono::Duration::from_std(remaining)
+            .ok()
+            .and_then(|delta| Local::now().checked_add_signed(delta))
+            .map(|time| time.format("%a %H:%M:%S %Z").to_string())
+            .unwrap_or_else(|| "outside calendar range".to_string());
+        let heading = if paused {
+            state.to_string()
+        } else {
+            format!("{state} | ends {end}")
+        };
+        frame.render_widget(
+            Paragraph::new(heading).alignment(Alignment::Center),
+            chunks[0],
+        );
+        let text = format_compact_duration(remaining);
+        let time_lines = ascii_time(&text)
             .into_iter()
-            .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White))))
+            .map(Line::from)
             .collect::<Vec<_>>();
         let time_width = time_lines
             .iter()
             .map(|line| line.width() as u16)
             .max()
             .unwrap_or(0);
-        let timer_area = center_rect(time_width.min(chunks[1].width), 7, chunks[1]);
-        frame.render_widget(Paragraph::new(time_lines), timer_area);
+        if time_width > chunks[1].width || chunks[1].height < 7 {
+            frame.render_widget(
+                Paragraph::new(format_time_left_text(
+                    self.timer.as_ref(),
+                    remaining,
+                    chunks[1].width,
+                ))
+                .alignment(Alignment::Center),
+                chunks[1],
+            );
+        } else {
+            let timer_area = center_rect(time_width, 7, chunks[1]);
+            frame.render_widget(Paragraph::new(time_lines), timer_area);
+        }
 
         frame.render_widget(
             Gauge::default()
                 .gauge_style(Style::default().fg(Color::Magenta))
                 .label(format_gauge_label(progress))
                 .ratio(progress),
-            chunks[3],
+            chunks[2],
         );
 
-        let commands = build_action_commands(&self.config);
-        let lines = if commands.is_empty() {
-            vec![Line::from("no post-timer actions enabled")]
-        } else {
-            commands
-                .iter()
-                .flat_map(|command| {
-                    let style = if command.is_dangerous() {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Green)
-                    };
-                    wrap_command(
-                        &command.display(),
-                        chunks[4].width.saturating_sub(4) as usize,
-                    )
-                    .into_iter()
-                    .map(move |line| Line::from(Span::styled(line, style)))
-                })
-                .collect::<Vec<_>>()
-        };
-        frame.render_widget(
-            Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .title(" commands after countdown ")
-                        .borders(Borders::ALL)
-                        .border_style(Color::Blue),
-                )
-                .wrap(Wrap { trim: false }),
-            chunks[4],
-        );
+        self.draw_preview(frame, chunks[3]);
 
         let footer = if self
             .timer
             .as_ref()
             .is_some_and(|timer| timer.pause.load(Ordering::Relaxed))
         {
-            "paused | p resume | x stop | q quit"
+            "paused | p resume | x stop | l results | PgUp/PgDn | q quit"
         } else {
-            "running | p pause | x stop | q quit"
+            "running | p pause | x stop | l results | PgUp/PgDn | q quit"
+        };
+        let footer = if area.width < 75 {
+            "p pause/resume | x stop | q quit\nl preview/results | PgUp/PgDn"
+        } else {
+            footer
         };
         frame.render_widget(
             Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
-            chunks[5],
+            chunks[4],
         );
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
-        let (_, remaining, progress) = self.timer_snapshot();
         let header = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1389,26 +1623,45 @@ impl App {
                 .wrap(Wrap { trim: false }),
             header[1],
         );
+        let ready = match self.until {
+            Some(time) => format!("not running | next {} local time", time.format("%H:%M")),
+            None => format!("not running | duration {}", self.config.duration),
+        };
         frame.render_widget(
-            Paragraph::new(format_time_left_text(
-                self.timer.as_ref(),
-                remaining,
-                header[2].width,
-            ))
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::White)),
+            Paragraph::new(ready).alignment(Alignment::Center),
             header[2],
         );
+        let presets = if area.width < 75 {
+            "1: 30m  2: 1h  3: 2h"
+        } else {
+            "1: 30m    2: 1h    3: 2h    Timer tab: until HH:MM"
+        };
         frame.render_widget(
-            Gauge::default()
-                .gauge_style(Style::default().fg(Color::Magenta))
-                .label(format_gauge_label(progress))
-                .ratio(progress),
+            Paragraph::new(presets)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::DarkGray)),
             header[3],
         );
     }
 
     fn draw_body(&mut self, frame: &mut Frame, area: Rect) {
+        let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+        let tabs = GROUPS
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                Span::styled(
+                    format!("{name} "),
+                    if index == self.group {
+                        Style::default().fg(Color::Black).bg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(Line::from(tabs)), chunks[0]);
+        let area = chunks[1];
         if area.width >= 118 {
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
@@ -1417,9 +1670,12 @@ impl App {
             self.draw_fields(frame, chunks[0]);
             self.draw_preview(frame, chunks[1]);
         } else {
+            let settings_height = (self.visible_fields().len() as u16 + 2)
+                .clamp(4, 12)
+                .min(area.height.saturating_sub(6));
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(8), Constraint::Length(8)])
+                .constraints([Constraint::Length(settings_height), Constraint::Min(6)])
                 .split(area);
             self.draw_fields(frame, chunks[0]);
             self.draw_preview(frame, chunks[1]);
@@ -1450,12 +1706,14 @@ impl App {
                     .edit
                     .as_ref()
                     .is_some_and(|edit| edit.field.key == field.key);
+                let prefix = format!("{marker} {}: ", field.label);
+                let width = usize::from(area.width.saturating_sub(2)).saturating_sub(prefix.len());
                 let value = if editing {
-                    format!("{}▌", self.edit.as_ref().expect("edit checked").value)
+                    edit_view(self.edit.as_ref().expect("edit checked"), width)
                 } else {
                     self.field_value(field)
                 };
-                let line = format!("{marker} {:<20} {}", field.label, value);
+                let line = format!("{prefix}{value}");
                 let style = if editing {
                     Style::default().fg(Color::Black).bg(Color::Yellow)
                 } else if selected {
@@ -1469,7 +1727,12 @@ impl App {
         frame.render_widget(
             List::new(items).block(
                 Block::default()
-                    .title(" settings ")
+                    .title(format!(
+                        " {} settings ({}/{}) ",
+                        GROUPS[self.group],
+                        self.focus + 1,
+                        fields.len()
+                    ))
                     .borders(Borders::ALL)
                     .border_style(Color::Blue),
             ),
@@ -1477,37 +1740,83 @@ impl App {
         );
     }
 
-    fn draw_preview(&self, frame: &mut Frame, area: Rect) {
-        let commands = build_action_commands(&self.config);
-        let lines = commands
-            .iter()
-            .flat_map(|command| {
-                let style = if command.is_dangerous() {
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    fn draw_preview(&mut self, frame: &mut Frame, area: Rect) {
+        let mut lines = Vec::new();
+        if self.show_log {
+            for message in &self.action_log {
+                let color = if message.contains("failed") {
+                    Color::Red
                 } else {
-                    Style::default().fg(Color::Green)
+                    Color::Green
                 };
-                wrap_command(&command.display(), area.width.saturating_sub(4) as usize)
-                    .into_iter()
-                    .map(move |line| Line::from(Span::styled(line, style)))
-            })
-            .collect::<Vec<_>>();
-        let lines = if lines.is_empty() {
-            vec![Line::from("no post-timer actions enabled")]
+                lines.extend(
+                    wrap_command(message, area.width.saturating_sub(4) as usize)
+                        .into_iter()
+                        .map(|line| Line::styled(line, Style::default().fg(color))),
+                );
+            }
+            if lines.is_empty() {
+                lines.push(Line::from("No results yet. Press r to start."));
+            }
         } else {
-            lines
+            lines = action_plan_lines(&self.config, usize::from(area.width.saturating_sub(2)));
+            if lines.is_empty() {
+                lines.push(Line::from("No actions enabled; countdown only."));
+            }
+        }
+        let height = usize::from(area.height.saturating_sub(2));
+        self.preview_offset = self.preview_offset.min(lines.len().saturating_sub(height));
+        let title = if self.show_log {
+            "results"
+        } else if area.width < 60 {
+            "plan / commands"
+        } else {
+            "action plan / commands"
+        };
+        let range = if lines.len() > height {
+            format!(
+                " {}-{}/{}",
+                self.preview_offset + 1,
+                (self.preview_offset + height).min(lines.len()),
+                lines.len()
+            )
+        } else {
+            String::new()
         };
         frame.render_widget(
-            Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .title(" command preview ")
-                        .borders(Borders::ALL)
-                        .border_style(Color::Blue),
-                )
-                .wrap(Wrap { trim: false }),
+            Paragraph::new(
+                lines
+                    .into_iter()
+                    .skip(self.preview_offset)
+                    .take(height)
+                    .collect::<Vec<_>>(),
+            )
+            .block(
+                Block::default()
+                    .title(format!(" {title}{range} "))
+                    .borders(Borders::ALL)
+                    .border_style(Color::Blue),
+            ),
             area,
         );
+    }
+
+    fn change_group(&mut self, step: usize) {
+        if self.timer.is_some() {
+            return;
+        }
+        self.group = (self.group + step) % GROUPS.len();
+        self.focus = 0;
+        self.offset = 0;
+    }
+
+    fn set_preset(&mut self, duration: &str) {
+        if self.timer.is_some() {
+            return;
+        }
+        self.until = None;
+        self.config.duration = duration.to_string();
+        self.status = format!("duration set to {duration}; press r to start");
     }
 
     fn activate(&mut self) -> Result<()> {
@@ -1520,6 +1829,7 @@ impl App {
             FieldKind::Edit | FieldKind::Int | FieldKind::Csv | FieldKind::Semi => {
                 self.edit = Some(EditState {
                     field,
+                    cursor: self.field_value(&field).len(),
                     value: self.field_value(&field),
                 });
             }
@@ -1540,14 +1850,42 @@ impl App {
                     Err(err) => self.status = format!("edit failed: {err}"),
                 }
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Char(_) => {
                 if let Some(edit) = &mut self.edit {
-                    edit.value.pop();
-                }
-            }
-            KeyCode::Char(value) => {
-                if let Some(edit) = &mut self.edit {
-                    edit.value.push(value);
+                    let previous = edit.value[..edit.cursor]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    let next = edit.value[edit.cursor..]
+                        .chars()
+                        .next()
+                        .map(|ch| edit.cursor + ch.len_utf8())
+                        .unwrap_or(edit.cursor);
+                    match key {
+                        KeyCode::Backspace => {
+                            edit.value.replace_range(previous..edit.cursor, "");
+                            edit.cursor = previous;
+                        }
+                        KeyCode::Delete => {
+                            edit.value.replace_range(edit.cursor..next, "");
+                        }
+                        KeyCode::Left => edit.cursor = previous,
+                        KeyCode::Right => edit.cursor = next,
+                        KeyCode::Home => edit.cursor = 0,
+                        KeyCode::End => edit.cursor = edit.value.len(),
+                        KeyCode::Char(ch) => {
+                            edit.value.insert(edit.cursor, ch);
+                            edit.cursor += ch.len_utf8();
+                        }
+                        _ => {}
+                    }
                 }
             }
             _ => {}
@@ -1557,7 +1895,20 @@ impl App {
     fn apply_edit(&mut self, field: Field, value: String) -> Result<()> {
         match field.kind {
             FieldKind::Edit => match field.key {
-                FieldKey::Duration => self.config.duration = value,
+                FieldKey::Duration => {
+                    parse_duration(&value)?;
+                    self.config.duration = value;
+                    self.until = None;
+                }
+                FieldKey::UntilTime => {
+                    self.until = if value.trim().is_empty() {
+                        None
+                    } else {
+                        let time = parse_clock_time(&value)?;
+                        duration_until(time, Local::now())?;
+                        Some(time)
+                    };
+                }
                 FieldKey::WorkspaceCommand => self.config.actions.workspace.command = value,
                 FieldKey::LockCommand => self.config.actions.lock.command = value,
                 FieldKey::MonitorCommand => self.config.actions.monitor.command = value,
@@ -1569,7 +1920,10 @@ impl App {
                 match field.key {
                     FieldKey::WorkspaceNumber => self.config.actions.workspace.number = number,
                     FieldKey::BrightnessValue => {
-                        self.config.actions.brightness.value = number.min(100) as u8
+                        if number > 100 {
+                            bail!("brightness must be between 0 and 100");
+                        }
+                        self.config.actions.brightness.value = number as u8
                     }
                     _ => {}
                 }
@@ -1606,7 +1960,11 @@ impl App {
             self.status = format!("timer failed: {err}");
             return;
         }
-        let duration = match parse_duration(&self.config.duration) {
+        let duration = match self
+            .until
+            .map(|time| duration_until(time, Local::now()))
+            .unwrap_or_else(|| parse_duration(&self.config.duration))
+        {
             Ok(duration) => duration,
             Err(err) => {
                 self.status = format!("timer failed: {err}");
@@ -1621,8 +1979,18 @@ impl App {
         let thread_stop = Arc::clone(&stop);
         let thread_pause = Arc::clone(&pause);
         let thread_remaining_ms = Arc::clone(&remaining_ms);
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        if self.until.is_some() {
+            config.duration = format!("{}ns", duration.as_nanos());
+        }
+        let (sender, updates) = mpsc::channel();
+        self.action_log.clear();
+        self.preview_offset = 0;
         let handle = thread::spawn(move || {
+            let mut output = UpdateWriter {
+                sender,
+                pending: String::new(),
+            };
             run_timer(
                 &config,
                 &thread_stop,
@@ -1630,7 +1998,7 @@ impl App {
                 &thread_remaining_ms,
                 RunMode::Tui,
                 TimerOptions::default(),
-                None,
+                Some(&mut output),
             )
         });
         self.timer = Some(TimerState {
@@ -1639,6 +2007,7 @@ impl App {
             pause,
             remaining_ms,
             handle,
+            updates,
         });
         self.status = "timer running".to_string();
     }
@@ -1659,13 +2028,18 @@ impl App {
     fn stop_timer(&mut self) {
         if let Some(timer) = self.timer.take() {
             timer.stop.store(true, Ordering::Relaxed);
-            self.apply_timer_result(timer.handle.join());
+            let result = timer.handle.join();
+            self.action_log.extend(timer.updates.try_iter());
+            self.apply_timer_result(result);
         } else {
             self.status = "timer stopped".to_string();
         }
     }
 
     fn reap_timer(&mut self) {
+        if let Some(timer) = &self.timer {
+            self.action_log.extend(timer.updates.try_iter());
+        }
         if self
             .timer
             .as_ref()
@@ -1674,13 +2048,17 @@ impl App {
             let Some(timer) = self.timer.take() else {
                 return;
             };
-            self.apply_timer_result(timer.handle.join());
+            let result = timer.handle.join();
+            self.action_log.extend(timer.updates.try_iter());
+            self.apply_timer_result(result);
         }
     }
 
     fn apply_timer_result(&mut self, result: thread::Result<Result<TimerReport>>) {
         match result {
             Ok(Ok(report)) => {
+                self.show_log = true;
+                self.preview_offset = 0;
                 let status = if report.failures.is_empty() {
                     "finished"
                 } else {
@@ -1702,7 +2080,11 @@ impl App {
             Ok(Err(err)) if err.to_string() == TIMER_STOPPED_MSG => {
                 self.status = "timer stopped".to_string()
             }
-            Ok(Err(err)) => self.status = format!("timer failed: {err}"),
+            Ok(Err(err)) => {
+                self.status = format!("timer failed: {err}");
+                self.action_log.push(self.status.clone());
+                self.show_log = true;
+            }
             Err(_) => self.status = "timer failed: thread panicked".to_string(),
         }
     }
@@ -1724,6 +2106,10 @@ impl App {
     fn field_value(&self, field: &Field) -> String {
         match field.key {
             FieldKey::Duration => self.config.duration.clone(),
+            FieldKey::UntilTime => self
+                .until
+                .map(|time| time.format("%H:%M").to_string())
+                .unwrap_or_default(),
             FieldKey::InhibitSleep => on_off(self.config.inhibit_sleep),
             FieldKey::WorkspaceEnabled => on_off(self.config.actions.workspace.enabled),
             FieldKey::WorkspaceBackend => self.config.actions.workspace.backend.clone(),
@@ -1806,6 +2192,9 @@ impl App {
 
     fn visible_fields(&self) -> Vec<&'static Field> {
         visible_fields(&self.config)
+            .into_iter()
+            .filter(|field| field_group(field.key) == self.group)
+            .collect()
     }
 
     fn focused_field(&self) -> Option<Field> {
@@ -1833,6 +2222,7 @@ enum FieldKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FieldKey {
     Duration,
+    UntilTime,
     InhibitSleep,
     WorkspaceEnabled,
     WorkspaceBackend,
@@ -1863,6 +2253,11 @@ const FIELDS: &[Field] = &[
     Field {
         label: "duration",
         key: FieldKey::Duration,
+        kind: FieldKind::Edit,
+    },
+    Field {
+        label: "until local time",
+        key: FieldKey::UntilTime,
         kind: FieldKind::Edit,
     },
     Field {
@@ -1947,7 +2342,7 @@ const FIELDS: &[Field] = &[
     Field {
         label: "screen poweroff backend",
         key: FieldKey::MonitorBackend,
-        kind: FieldKind::Cycle(&["auto", "hyprland", "niri", "sway", "kde", "gnome", "x11"]),
+        kind: FieldKind::Cycle(&["auto", "hyprland", "niri", "sway", "kde", "x11"]),
     },
     Field {
         label: "screen poweroff command",
@@ -2023,6 +2418,7 @@ fn field_visible(config: &Config, key: FieldKey) -> bool {
         FieldKey::KillProcesses => config.actions.kill.enabled,
         FieldKey::CustomCommands => config.actions.custom.enabled,
         FieldKey::Duration
+        | FieldKey::UntilTime
         | FieldKey::InhibitSleep
         | FieldKey::WorkspaceEnabled
         | FieldKey::MediaEnabled
@@ -2070,7 +2466,7 @@ fn format_compact_duration(duration: Duration) -> String {
 
 fn format_time_left_text(timer: Option<&TimerState>, remaining: Duration, width: u16) -> String {
     if timer.is_none() {
-        return "time left: --".to_string();
+        return "not running".to_string();
     }
 
     let full = format!("time left: {}", format_duration(remaining));
@@ -2229,23 +2625,51 @@ fn center_rect(width: u16, height: u16, area: Rect) -> Rect {
     }
 }
 
-fn wrap_command(command: &str, width: usize) -> Vec<String> {
-    let width = width.max(8);
+fn action_plan_lines(config: &Config, width: usize) -> Vec<Line<'static>> {
+    let description_width = (width / 3).clamp(8, 32);
+    let command_width = width.saturating_sub(description_width + 3).max(1);
     let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in command.split_whitespace() {
-        if current.is_empty() {
-            current.push_str("$ ");
-            current.push_str(word);
-        } else if current.len() + word.len() < width {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            lines.push(current);
-            current = format!("  {word}");
+    for (index, command) in build_action_commands(config).iter().enumerate() {
+        let descriptions = wrap_command(
+            &format!("{}. {}", index + 1, action_description(command, config)),
+            description_width,
+        );
+        let commands = wrap_command(&format!("$ {}", command.display()), command_width);
+        let dangerous = command.is_dangerous();
+        let description_style = Style::default()
+            .fg(if dangerous { Color::Red } else { Color::Cyan })
+            .add_modifier(Modifier::BOLD);
+        let command_style = Style::default().fg(if dangerous { Color::Red } else { Color::Green });
+        for row in 0..descriptions.len().max(commands.len()) {
+            let description = descriptions.get(row).map(String::as_str).unwrap_or("");
+            let padding = description_width.saturating_sub(Line::from(description).width());
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{description}{}", " ".repeat(padding)),
+                    description_style,
+                ),
+                Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    commands.get(row).cloned().unwrap_or_default(),
+                    command_style,
+                ),
+            ]));
         }
     }
-    if !current.is_empty() {
+    lines
+}
+
+fn wrap_command(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for source in text.split('\n') {
+        let mut current = String::new();
+        for ch in source.chars() {
+            if !current.is_empty() && Line::from(format!("{current}{ch}")).width() > width {
+                lines.push(std::mem::take(&mut current));
+            }
+            current.push(ch);
+        }
         lines.push(current);
     }
     lines
@@ -2263,6 +2687,219 @@ fn split_list(value: &str, separator: char) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn render_app(app: &mut App, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn action_plan_pairs_descriptions_and_shell_in_aligned_columns() {
+        let mut config = quiet_config("25m");
+        config.actions.workspace.enabled = true;
+        config.actions.workspace.backend = "niri".to_string();
+        config.actions.workspace.number = 5;
+        for width in [34, 78, 104, 158] {
+            let lines = action_plan_lines(&config, width);
+            let first = &lines[0];
+            assert!(first.spans[0].content.starts_with("1. Switch"));
+            assert!(first.spans[2].content.starts_with("$ niri"));
+            assert_ne!(first.spans[0].style.fg, first.spans[2].style.fg);
+            assert!(lines.iter().all(|line| line.width() <= width));
+            assert_eq!(
+                lines
+                    .iter()
+                    .map(|line| line.spans[2].content.as_ref())
+                    .collect::<String>(),
+                "$ niri msg action focus-workspace 5"
+            );
+            assert!(
+                lines
+                    .iter()
+                    .all(|line| line.spans[0].width() == first.spans[0].width())
+            );
+        }
+    }
+
+    #[test]
+    fn preview_wrapping_preserves_spaces_unicode_and_long_tokens() {
+        let command = format!("$ printf 'a  b猫' {}", "x".repeat(140));
+        let lines = wrap_command(&command, 20);
+        assert_eq!(lines.concat(), command);
+        assert!(
+            lines
+                .iter()
+                .all(|line| Line::from(line.as_str()).width() <= 20)
+        );
+    }
+
+    #[test]
+    fn grouped_layouts_show_controls_and_scrollable_commands() {
+        for (width, height) in [(36, 20), (80, 24), (106, 49), (160, 40)] {
+            let mut app = App::new(PathBuf::from("/tmp/layout.yaml"), Config::default());
+            for group in 0..GROUPS.len() {
+                let text = render_app(&mut app, width, height);
+                assert!(text.contains("not running"), "{width}x{height}\n{text}");
+                assert!(text.contains("q quit"), "{width}x{height}\n{text}");
+                assert!(
+                    text.contains(&format!("{} settings", GROUPS[group])),
+                    "{text}"
+                );
+                assert!(text.contains("plan / commands"), "{text}");
+                assert!(!text.contains("0%"));
+                app.change_group(1);
+            }
+            app.preview_offset = usize::MAX;
+            render_app(&mut app, width, height);
+            assert!(app.preview_offset < usize::MAX);
+            // After a resize, scrolling still produces a valid viewport.
+            render_app(&mut app, 36, 20);
+        }
+    }
+
+    #[test]
+    fn narrow_countdown_uses_compact_digits_and_keeps_controls() {
+        let mut app = App::new(PathBuf::from("/tmp/layout.yaml"), quiet_config("25m"));
+        let mut timer = dummy_timer_state();
+        timer.remaining_ms.store(65_000, Ordering::Relaxed);
+        timer.duration = Duration::from_secs(90);
+        app.timer = Some(timer);
+        let text = render_app(&mut app, 36, 20);
+        assert!(text.contains("time left: 1m5s"), "{text}");
+        assert!(text.contains("ends"), "{text}");
+        assert!(text.contains("q quit"), "{text}");
+        app.timer
+            .as_ref()
+            .unwrap()
+            .pause
+            .store(true, Ordering::Relaxed);
+        let text = render_app(&mut app, 36, 20);
+        assert!(text.contains("paused"));
+        assert!(!text.contains("ends"));
+    }
+
+    #[test]
+    fn invalid_duration_and_brightness_edits_leave_config_intact() {
+        let mut app = App::new(PathBuf::from("/tmp/edit.yaml"), quiet_config("25m"));
+        for (key, value) in [
+            (FieldKey::Duration, "bogus"),
+            (FieldKey::BrightnessValue, "101"),
+        ] {
+            let field = *FIELDS.iter().find(|field| field.key == key).unwrap();
+            let before = app.field_value(&field);
+            assert!(app.apply_edit(field, value.to_string()).is_err());
+            assert_eq!(app.field_value(&field), before);
+        }
+    }
+
+    #[test]
+    fn unicode_edits_move_and_delete_at_character_boundaries() {
+        let mut app = App::new(PathBuf::from("/tmp/edit.yaml"), quiet_config("25m"));
+        let field = *FIELDS
+            .iter()
+            .find(|field| field.key == FieldKey::NotifyMessage)
+            .unwrap();
+        app.edit = Some(EditState {
+            field,
+            value: "a猫я".to_string(),
+            cursor: "a猫я".len(),
+        });
+        app.handle_edit_key(KeyCode::Left);
+        app.handle_edit_key(KeyCode::Backspace);
+        app.handle_edit_key(KeyCode::Char('🙂'));
+        assert_eq!(app.edit.as_ref().unwrap().value, "a🙂я");
+        assert!(edit_view(app.edit.as_ref().unwrap(), 4).contains('▌'));
+        app.handle_edit_key(KeyCode::Home);
+        app.handle_edit_key(KeyCode::Delete);
+        assert_eq!(app.edit.as_ref().unwrap().value, "🙂я");
+        app.handle_edit_key(KeyCode::End);
+        app.handle_edit_key(KeyCode::Enter);
+        assert_eq!(app.config.actions.notify.message, "🙂я");
+    }
+
+    #[test]
+    fn clock_targets_roll_over_midnight_and_presets_clear_target() {
+        let zone = chrono::FixedOffset::east_opt(3600).unwrap();
+        let now = zone.with_ymd_and_hms(2026, 12, 31, 23, 45, 0).unwrap();
+        assert_eq!(
+            duration_until(parse_clock_time("00:15").unwrap(), now).unwrap(),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            duration_until(parse_clock_time("23:45").unwrap(), now).unwrap(),
+            Duration::from_secs(86400)
+        );
+        for value in ["25:00", "12:60", "12:30:00", "1:30", "hello"] {
+            assert!(parse_clock_time(value).is_err());
+        }
+        let mut app = App::new(PathBuf::from("/tmp/edit.yaml"), quiet_config("25m"));
+        let field = *FIELDS
+            .iter()
+            .find(|field| field.key == FieldKey::UntilTime)
+            .unwrap();
+        app.apply_edit(field, "23:30".to_string()).unwrap();
+        assert_eq!(app.config.duration, "25m");
+        app.set_preset("1h");
+        assert!(app.until.is_none());
+        assert_eq!(app.config.duration, "1h");
+        assert!(app.timer.is_none());
+    }
+
+    #[test]
+    #[ignore = "run with TZ=Europe/Bratislava to check local daylight saving transitions"]
+    fn local_deadlines_handle_daylight_saving_transitions() {
+        let spring = Local.with_ymd_and_hms(2026, 3, 29, 1, 30, 0).unwrap();
+        assert!(duration_until(parse_clock_time("02:30").unwrap(), spring).is_err());
+        assert_eq!(
+            duration_until(parse_clock_time("03:30").unwrap(), spring).unwrap(),
+            Duration::from_secs(3600)
+        );
+        let fall = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 25, 0, 45, 0)
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!(
+            duration_until(parse_clock_time("02:30").unwrap(), fall).unwrap(),
+            Duration::from_secs(2700)
+        );
+    }
+
+    #[test]
+    fn tui_worker_reports_each_controlled_action_result() {
+        let mut config = quiet_config("1ns");
+        config.actions.custom.enabled = true;
+        config.actions.custom.commands = vec!["exit 0".to_string(), "exit 7".to_string()];
+        let (sender, receiver) = mpsc::channel();
+        let mut writer = UpdateWriter {
+            sender,
+            pending: String::new(),
+        };
+        let report = run_timer(
+            &config,
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicU64::new(0)),
+            RunMode::Tui,
+            TimerOptions::default(),
+            Some(&mut writer),
+        )
+        .unwrap();
+        let lines = receiver.try_iter().collect::<Vec<_>>();
+        assert!(lines.iter().any(|line| line == "custom: done"));
+        assert!(lines.iter().any(|line| line.starts_with("custom failed:")));
+        assert_eq!(report.failures.len(), 1);
+        assert!(!lines.iter().any(|line| line.contains("remaining:")));
+    }
 
     fn quiet_config(duration: &str) -> Config {
         let mut config = Config {
@@ -2290,6 +2927,35 @@ mod tests {
         assert!(parse_duration("1ns").is_ok());
         assert!(parse_duration("bad").is_err());
         assert!(parse_duration("0s").is_err());
+    }
+
+    #[test]
+    fn parse_duration_rejects_overflow_and_rounds_that_become_zero() {
+        assert!(parse_duration(
+            "999999999999999999999999999999999999999999999999999999999999999999999999999999999999999h"
+        )
+        .is_err());
+        assert!(parse_duration("0.0000000001ns").is_err());
+    }
+
+    #[test]
+    fn auto_backends_fail_when_no_supported_command_exists() {
+        let workspace = workspace_command(&WorkspaceAction {
+            backend: "auto".to_string(),
+            ..WorkspaceAction::default()
+        });
+        let monitor = monitor_command(&MonitorAction {
+            backend: "auto".to_string(),
+            ..MonitorAction::default()
+        });
+        let lock = lock_command(&LockAction {
+            backend: "auto".to_string(),
+            ..LockAction::default()
+        });
+
+        for command in [workspace, monitor, lock] {
+            assert!(command.display().contains("exit 127"));
+        }
     }
 
     #[test]
@@ -2411,6 +3077,7 @@ mod tests {
                 kind: FieldKind::Int,
             },
             value: "not-a-number".to_string(),
+            cursor: 12,
         });
 
         app.handle_edit_key(KeyCode::Enter);
@@ -2432,6 +3099,7 @@ mod tests {
                 kind: FieldKind::Int,
             },
             value: "5".to_string(),
+            cursor: 1,
         });
 
         app.handle_edit_key(KeyCode::Enter);
@@ -2559,7 +3227,7 @@ mod tests {
     fn timer_header_text_compacts_for_narrow_widths() {
         let remaining = Duration::from_secs(65);
 
-        assert_eq!(format_time_left_text(None, remaining, 20), "time left: --");
+        assert_eq!(format_time_left_text(None, remaining, 20), "not running");
         assert_eq!(
             format_time_left_text(Some(&dummy_timer_state()), remaining, 40),
             "time left: 1m5s"
@@ -2701,7 +3369,9 @@ mod tests {
                 no_actions: false,
             })
         });
+        let (_, updates) = mpsc::channel();
         TimerState {
+            updates,
             duration: Duration::from_secs(1),
             stop,
             pause: Arc::new(AtomicBool::new(false)),

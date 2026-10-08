@@ -22,7 +22,7 @@ git remote set-url --push origin ssh://git@gitssh.forust.xyz:2221/forust/gosleep
 HTTPS remote URL:
 
 ```text
-https://gitea.forust.xyz/forust/gosleep.git
+https://git.forust.xyz/forust/gosleep.git
 ```
 
 ## Gitea Actions Setup
@@ -30,14 +30,8 @@ https://gitea.forust.xyz/forust/gosleep.git
 1. Enable Actions for `forust/gosleep`.
 2. Register or select a Linux runner with labels used by the workflows:
    `self-hosted`, `linux`, `arch`, `homelab`.
-3. Ensure the runner has:
-   - Rust stable toolchain
-   - `rustfmt`
-   - `clippy`
-   - `curl`
-   - `jq`
-   - `sha256sum`
-   - Docker, if using the YAML lint job as written
+3. Ensure the runner has Docker, `curl`, `jq`, and `sha256sum`. Docker runs the
+   pinned Rust toolchain container and the YAML lint container.
 4. Confirm Actions job token permissions allow `contents: write`.
    The release workflow uses Gitea Actions' built-in `GITEA_TOKEN`, exposed in the workflow as `${{ secrets.GITEA_TOKEN }}`; no extra repository secret is required.
 
@@ -63,6 +57,7 @@ cargo fmt --check
 cargo test --locked
 cargo clippy --locked -- -D warnings
 cargo build --release --locked
+test "$(cat VERSION)" = "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
 ```
 
 ## Create Release
@@ -77,12 +72,13 @@ git push origin "v${version}"
 
 The `.gitea/workflows/release.yaml` workflow will:
 
-1. Re-run release gates: `cargo fmt --check`, `cargo test --locked`, `cargo clippy --locked -- -D warnings`, and YAML lint.
-2. Build `target/release/gosleep-timer`.
-3. Copy binary as `gosleep-timer-<version>-linux-amd64`.
-4. Generate a SHA-256 checksum.
-5. Create a Gitea release.
-6. Upload the binary and checksum as release assets.
+1. Check that the tag, `VERSION`, and Cargo package version match.
+2. Re-run release gates: formatting, locked tests, local clock transition tests, clippy, and YAML lint. Rust runs in the pinned Node container. YAML lint runs in a separate host job. Release checks and builds reuse the CI Cargo cache.
+3. Install the Rust toolchain in the build job and build `target/release/gosleep-timer`.
+4. Copy binary as `gosleep-timer-<version>-linux-amd64`.
+5. Generate a SHA-256 checksum.
+6. Create a Gitea release.
+7. Upload the binary and checksum as release assets.
 
 The workflow is idempotent: if the release already exists, it reuses it and replaces assets with matching names.
 If any lint or test step fails, the build and release job will not run.

@@ -7,7 +7,7 @@ Rust TUI sleep timer for Linux desktop actions.
 ## Status
 
 - Release tags: `vMAJOR.MINOR.PATCH`
-- Primary repository: <https://gitea.forust.xyz/forust/gosleep>
+- Primary repository: <https://git.forust.xyz/forust/gosleep>
 - SSH upstream: `ssh://git@gitssh.forust.xyz:2221/forust/gosleep.git`
 
 ## Features
@@ -117,14 +117,49 @@ gosleep-timer --config ./config.yaml preview
 | --- | --- |
 | `j` / `Down` | Move down |
 | `k` / `Up` | Move up |
+| `Tab` / `Shift+Tab` | Select next/previous settings group |
 | `Space` / `Enter` | Toggle, cycle, or edit focused field |
+| `1` / `2` / `3` | Set duration to 30 minutes / 1 hour / 2 hours |
+| `l` | Switch between the action plan and results |
+| `PageUp` / `PageDown` | Scroll the action plan or results |
 | `Enter` while editing | Apply edit |
 | `Esc` while editing | Cancel edit |
+| `Left` / `Right`, `Home` / `End` while editing | Move the text cursor |
+| `Backspace` / `Delete` while editing | Delete before/after the cursor |
 | `r` | Start/restart timer |
 | `p` | Pause/resume running timer |
 | `x` | Stop timer |
 | `s` | Save config |
 | `q` / `Esc` | Quit |
+
+Settings are grouped into **Timer**, **Audio**, **Screen**, **Session**, and **More**.
+The selected field has a context hint. Text edits use a yellow background and a
+visible cursor. Invalid durations and brightness values stay open for correction.
+
+The idle screen shows `not running`. The running screen shows the remaining time,
+progress, and estimated local end time. Pausing extends the end time. Small
+terminals use a compact timer instead of cropped large digits. The minimum size
+is 36 columns by 20 rows. Settings and the preview stack below 118 columns; wider
+terminals show them side by side.
+
+The action plan lists enabled actions in execution order. Each row pairs a cyan
+action description on the left with its green shell command on the right. Long
+text wraps within its column. Dangerous actions remain red. Use `PageUp` and
+`PageDown` when the line count shows more content. Use
+`l` for the current run's results, including each action's success or failure.
+Results open automatically when the timer completes and remain until the next run.
+
+To finish at a clock time, edit **until local time** in the **Timer** group. Enter
+`HH:MM`, such as `23:30`, then press `r`. The timer uses the next occurrence of that
+local time, today or tomorrow. If a clock change repeats the time, the next future
+occurrence is used. A time that does not exist due to a clock change is rejected.
+The target is converted to a countdown when you press `r`; pausing delays it.
+Later system clock changes do not change the countdown.
+
+The clock target is for the current TUI session and is not saved. The saved
+`duration` remains the default. Set a duration preset, edit `duration`, or clear
+**until local time** to return to duration mode. Presets set the time; press `r`
+to start. Numeric keys typed during editing enter text.
 
 ## Configuration
 
@@ -149,7 +184,7 @@ actions:
     enabled: false
   lock:
     enabled: false
-    command: loginctl lock-session
+    backend: auto
   kill:
     enabled: false
     processes: []
@@ -167,7 +202,12 @@ Supported values:
 | `duration` | Go-style duration strings such as `25m`, `45m`, `1h30m`, `10s` |
 | `actions.workspace.backend` | `auto`, `niri`, `hyprland`, `sway`, `i3`, `kde` |
 | `actions.media.action` | `none`, `stop`, `pause`, `play-pause`, `next`, `previous` |
-| `actions.power.mode` | `none`, `poweroff`, `reboot` |
+| `actions.monitor.backend` | `auto`, `hyprland`, `niri`, `sway`, `kde`, `x11` |
+| `actions.power.mode` | `none`, `suspend`, `hibernate`, `hybrid-sleep`, `poweroff`, `reboot` |
+
+Native GNOME monitor power-off is not supported. The `auto` backend reports an
+action failure when it cannot find a supported backend. Use the custom monitor
+command for a desktop-specific command.
 
 ## Commands Run After Countdown
 
