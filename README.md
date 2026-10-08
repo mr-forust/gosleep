@@ -148,6 +148,9 @@ text wraps within its column. Dangerous actions remain red. Use `PageUp` and
 `PageDown` when the line count shows more content. Use
 `l` for the current run's results, including each action's success or failure.
 Results open automatically when the timer completes and remain until the next run.
+Argument previews quote each argument so spaces and quotes are clear. Control
+characters and invisible formatting marks appear as visible escapes. This
+changes the display only; actions still use the configured values.
 
 To finish at a clock time, edit **until local time** in the **Timer** group. Enter
 `HH:MM`, such as `23:30`, then press `r`. The timer uses the next occurrence of that

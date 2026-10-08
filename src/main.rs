@@ -282,7 +282,16 @@ impl Default for PowerAction {
 
 impl ActionCommand {
     fn display(&self) -> String {
-        self.shell.clone().unwrap_or_else(|| self.args.join(" "))
+        self.shell
+            .as_deref()
+            .map(escape_terminal_text)
+            .unwrap_or_else(|| {
+                self.args
+                    .iter()
+                    .map(|argument| display_argument(argument))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
     }
 
     fn is_dangerous(&self) -> bool {
@@ -316,6 +325,64 @@ impl ActionCommand {
         .iter()
         .any(|needle| command.contains(needle))
     }
+}
+
+fn is_terminal_control(ch: char) -> bool {
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{feff}'
+        )
+}
+
+fn append_terminal_safe_char(output: &mut String, ch: char) {
+    match ch {
+        '\n' => output.push_str("\\n"),
+        '\r' => output.push_str("\\r"),
+        '\t' => output.push_str("\\t"),
+        '\0' => output.push_str("\\0"),
+        ch if is_terminal_control(ch) => output.push_str(&format!("\\u{{{:x}}}", ch as u32)),
+        ch => output.push(ch),
+    }
+}
+
+fn escape_terminal_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        append_terminal_safe_char(&mut escaped, ch);
+    }
+    escaped
+}
+
+fn display_argument(argument: &str) -> String {
+    let quoted = argument.is_empty()
+        || argument.chars().any(|ch| {
+            !ch.is_ascii_alphanumeric()
+                && !matches!(
+                    ch,
+                    '-' | '_' | '.' | '/' | ':' | '@' | '+' | '=' | ',' | '%'
+                )
+        });
+    let mut display = String::with_capacity(argument.len() + if quoted { 2 } else { 0 });
+    if quoted {
+        display.push('\'');
+    }
+    for ch in argument.chars() {
+        match ch {
+            '\'' if quoted => display.push_str("'\\''"),
+            ch => append_terminal_safe_char(&mut display, ch),
+        }
+    }
+    if quoted {
+        display.push('\'');
+    }
+    display
 }
 
 impl TimerReport {
@@ -1343,9 +1410,15 @@ fn edit_view(edit: &EditState, width: usize) -> String {
     if width == 1 {
         return "▌".to_string();
     }
+    let value = escape_terminal_text(&edit.value);
+    let cursor = edit
+        .value
+        .get(..edit.cursor)
+        .map(|prefix| escape_terminal_text(prefix).len())
+        .unwrap_or(value.len());
     let mut start = 0;
-    while Line::from(&edit.value[start..edit.cursor]).width() + 1 + usize::from(start > 0) > width {
-        start += edit.value[start..]
+    while Line::from(&value[start..cursor]).width() + 1 + usize::from(start > 0) > width {
+        start += value[start..]
             .chars()
             .next()
             .map(char::len_utf8)
@@ -1354,9 +1427,9 @@ fn edit_view(edit: &EditState, width: usize) -> String {
     let mut view = format!(
         "{}{}▌",
         if start > 0 { "‹" } else { "" },
-        &edit.value[start..edit.cursor]
+        &value[start..cursor]
     );
-    for ch in edit.value[edit.cursor..].chars() {
+    for ch in value[cursor..].chars() {
         if Line::from(format!("{view}{ch}")).width() > width {
             break;
         }
@@ -1711,7 +1784,7 @@ impl App {
                 let value = if editing {
                     edit_view(self.edit.as_ref().expect("edit checked"), width)
                 } else {
-                    self.field_value(field)
+                    escape_terminal_text(&self.field_value(field))
                 };
                 let line = format!("{prefix}{value}");
                 let style = if editing {
@@ -2732,6 +2805,97 @@ mod tests {
     }
 
     #[test]
+    fn action_display_escapes_terminal_controls_and_quotes_arguments() {
+        let message = "line one\nline two\r\t\u{1b}[31m\u{9b}2J\u{7}\u{202e}猫🙂";
+        let invisible_joiner = "syst\u{200d}emctl";
+        let command = ActionCommand {
+            label: "notify",
+            args: vec![
+                "notify-send".to_string(),
+                "--".to_string(),
+                message.to_string(),
+                "$(id)".to_string(),
+                "`id`".to_string(),
+                invisible_joiner.to_string(),
+            ],
+            shell: None,
+        };
+
+        let display = command.display();
+
+        assert_eq!(command.args[2], message);
+        assert!(display.contains("\\n"));
+        assert!(display.contains("\\r\\t"));
+        assert!(display.contains("\\u{1b}[31m"));
+        assert!(display.contains("\\u{9b}2J"));
+        assert!(display.contains("\\u{7}"));
+        assert!(display.contains("\\u{202e}"));
+        assert!(display.contains("猫🙂"));
+        assert!(display.contains("'$(id)'"));
+        assert!(display.contains("'`id`'"));
+        assert!(display.contains("'syst\\u{200d}emctl'"));
+        assert!(!display.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn shell_display_escapes_controls_without_changing_executed_command() {
+        let shell = "printf 'first\nsecond' \u{1b}]0;title\u{7}";
+        let command = ActionCommand {
+            label: "custom",
+            args: Vec::new(),
+            shell: Some(shell.to_string()),
+        };
+
+        assert_eq!(command.shell.as_deref(), Some(shell));
+        let display = command.display();
+        assert!(display.contains("first\\nsecond"));
+        assert!(display.contains("\\u{1b}]0;title\\u{7}"));
+        assert!(!display.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn tui_settings_and_edit_view_escape_configured_terminal_controls() {
+        let message = "line one\nline two\u{1b}]0;title\u{7}\u{2066}syst\u{200d}emctl猫🙂";
+        let mut config = quiet_config("25m");
+        config.actions.notify.enabled = true;
+        config.actions.notify.message = message.to_string();
+        let mut app = App::new(PathBuf::from("/tmp/layout.yaml"), config);
+        let field = *FIELDS
+            .iter()
+            .find(|field| field.key == FieldKey::NotifyMessage)
+            .unwrap();
+        app.group = field_group(field.key);
+        app.focus = app
+            .visible_fields()
+            .iter()
+            .position(|visible| visible.key == field.key)
+            .unwrap();
+        let assert_safe_render = |rendered: &str| {
+            assert!(rendered.contains("\\n"));
+            assert!(rendered.contains("\\u{1b}]0;title\\u{7}"));
+            assert!(rendered.contains("\\u{2066}"));
+            assert!(rendered.contains("\\u{200d}"));
+            assert!(rendered.contains('猫'));
+            assert!(rendered.contains('🙂'));
+            assert!(!rendered.contains('\u{1b}'));
+            assert!(!rendered.contains('\u{7}'));
+            assert!(!rendered.contains('\u{2066}'));
+            assert!(!rendered.contains('\u{200d}'));
+        };
+
+        let rendered = render_app(&mut app, 160, 40);
+        assert_safe_render(&rendered);
+
+        app.edit = Some(EditState {
+            field,
+            value: message.to_string(),
+            cursor: message.len(),
+        });
+        let editing_rendered = render_app(&mut app, 160, 40);
+        assert_safe_render(&editing_rendered);
+    }
+
+    #[test]
     fn preview_wrapping_preserves_spaces_unicode_and_long_tokens() {
         let command = format!("$ printf 'a  b猫' {}", "x".repeat(140));
         let lines = wrap_command(&command, 20);
@@ -2998,7 +3162,7 @@ mod tests {
         );
         assert_eq!(
             commands[0].display(),
-            "notify-send gosleep-timer -- it's done"
+            "notify-send gosleep-timer -- 'it'\\''s done'"
         );
         assert_eq!(preview_commands(&config), vec![commands[0].display()]);
     }

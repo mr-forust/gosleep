@@ -6,6 +6,12 @@ The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-10-08
+
+### Fixed
+
+- Escape terminal controls in configured action previews and quote arguments.
+
 ## [1.4.0] - 2026-10-08
 
 ### Added
