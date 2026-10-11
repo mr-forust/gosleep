@@ -325,16 +325,50 @@ fn paused_presence(power_mode: &str) -> PresenceActivity {
     }
 }
 
-/// Post-countdown transitional state published on successful completion
-/// instead of clearing. US-004 replaces this with the elapsed `Sleeping for`
-/// status and extends the presence lifetime; US-003 only guarantees the
-/// countdown is not cleared on success.
+/// Post-countdown state for runs that do not represent a real sleep interval
+/// (`--no-actions`, dry-run, action failures, or no enabled actions). Kept as
+/// `finished` with no timestamps so Discord never shows a misleading elapsed
+/// sleep timer.
 fn post_countdown_presence() -> PresenceActivity {
     PresenceActivity {
         details: "Sleep timer".to_string(),
         state: "finished".to_string(),
         start_timestamp: None,
         end_timestamp: None,
+    }
+}
+
+/// Post-countdown sleep status for successful real-action runs (US-004).
+///
+/// `sleep_start_unix` must be captured at the start of post-countdown actions
+/// so Discord shows elapsed time since activation. The state text names the
+/// scheduled duration; the live elapsed counter comes from `start_timestamp`.
+fn sleeping_presence(sleep_start_unix: u64, duration: Duration) -> PresenceActivity {
+    PresenceActivity {
+        details: "Sleep timer".to_string(),
+        state: format!("Sleeping for {}", format_duration(duration)),
+        start_timestamp: Some(sleep_start_unix),
+        end_timestamp: None,
+    }
+}
+
+/// Pure post-run presence selector (US-004).
+///
+/// Only a real, fully successful action run represents a sleep interval and
+/// gets the elapsed `Sleeping for ...` status. Dry-run, `--no-actions`,
+/// failures, and empty action lists keep the accurate timestamp-free
+/// `finished` state so Discord never shows a misleading sleep timer.
+fn post_run_presence(
+    options: TimerOptions,
+    has_failures: bool,
+    has_actions: bool,
+    sleep_start_unix: u64,
+    duration: Duration,
+) -> PresenceActivity {
+    if !options.dry_run && !options.no_actions && !has_failures && has_actions {
+        sleeping_presence(sleep_start_unix, duration)
+    } else {
+        post_countdown_presence()
     }
 }
 
@@ -345,6 +379,7 @@ fn post_countdown_presence() -> PresenceActivity {
 /// unbounded channel. Missing Discord, a missing socket, or any I/O failure
 /// is swallowed so timer runs never fail or stall. Dropping the client closes
 /// the channel; the worker attempts one final clear in the background.
+#[derive(Debug)]
 struct DiscordPresence {
     sender: Option<mpsc::Sender<PresenceRequest>>,
     clear_on_drop: bool,
@@ -765,7 +800,7 @@ fn main() -> Result<()> {
                 dry_run,
                 no_actions,
             };
-            let report = run_timer(
+            let (report, _sleep_presence) = run_timer(
                 &config,
                 &Arc::new(AtomicBool::new(false)),
                 &Arc::new(AtomicBool::new(false)),
@@ -774,6 +809,10 @@ fn main() -> Result<()> {
                 options,
                 Some(&mut stdout),
             )?;
+            // `_sleep_presence` stays alive through the wake-confirmation wait
+            // so the elapsed `Sleeping for ...` status remains visible; it is
+            // disarmed, so dropping it at scope end closes the IPC connection
+            // and lets Discord clear the status on process exit/poweroff.
             let slept_seconds = prompt_wake_confirmation(&config, options)?;
             let status = if report.failures.is_empty() {
                 "finished"
@@ -1430,15 +1469,17 @@ fn run_timer(
     mode: RunMode,
     options: TimerOptions,
     mut output: Option<&mut dyn Write>,
-) -> Result<TimerReport> {
+) -> Result<(TimerReport, DiscordPresence)> {
     validate_config(config)?;
     let duration = parse_duration(&config.duration)?;
     // Local IPC only: no bot token, network service, or credentials. The
     // worker connects in the background; missing Discord never fails/stalls.
     // Countdown updates (US-003) are published from this thread for both CLI
     // and TUI runs, including --no-actions and dry-run. Stopped runs clear
-    // explicitly; successful runs transition to the post-countdown state and
-    // disarm the drop-clear (US-004 extends the lifetime past this guard).
+    // explicitly. Successful runs transition to the post-countdown state and
+    // disarm the drop-clear; the returned guard keeps the IPC connection open
+    // so US-004 retains `Sleeping for ...` while the TUI stays open and during
+    // the CLI wake-confirmation wait. Discord clears it on process exit/poweroff.
     let mut discord = DiscordPresence::start(&config.discord);
     discord.update(countdown_presence(
         duration,
@@ -1545,6 +1586,8 @@ fn run_timer(
     if let Some(output) = output.as_deref_mut() {
         write_timer_line(output, "countdown finished")?;
     }
+    // Elapsed sleep time is measured from the start of post-countdown actions.
+    let sleep_start_unix = unix_timestamp();
     let mut failures = Vec::new();
     let actions = if options.no_actions {
         Vec::new()
@@ -1580,10 +1623,20 @@ fn run_timer(
         discord.clear();
         bail!(TIMER_STOPPED_MSG);
     }
-    // Successful completion transitions to the post-countdown state instead
-    // of clearing, so Discord keeps showing the finished status until the
-    // process exits (CLI) or US-004 publishes the elapsed sleep status.
-    discord.update(post_countdown_presence());
+    // Successful completion transitions instead of clearing. Only a real,
+    // fully successful action run represents a sleep interval, so only then
+    // publish `Sleeping for ...` with the elapsed start timestamp. Dry-run,
+    // --no-actions, failures, and empty action lists keep the accurate
+    // timestamp-free `finished` state. The disarmed guard is returned so the
+    // caller retains the status; Discord clears it on process exit/poweroff.
+    let completed = post_run_presence(
+        options,
+        !failures.is_empty(),
+        !actions.is_empty(),
+        sleep_start_unix,
+        duration,
+    );
+    discord.update(completed);
     discord.disarm();
     let report = TimerReport {
         started_at,
@@ -1598,7 +1651,7 @@ fn run_timer(
     {
         write_timer_line(output, &format!("{} action(s) failed", failures.len()))?;
     }
-    Ok(report)
+    Ok((report, discord))
 }
 
 fn prepare_command_stdio(process: &mut Command, mode: RunMode) {
@@ -1776,6 +1829,7 @@ struct App {
     preview_offset: usize,
     show_log: bool,
     action_log: Vec<String>,
+    sleep_presence: Option<DiscordPresence>,
 }
 
 struct TimerState {
@@ -1783,7 +1837,7 @@ struct TimerState {
     stop: Arc<AtomicBool>,
     pause: Arc<AtomicBool>,
     remaining_ms: Arc<AtomicU64>,
-    handle: thread::JoinHandle<Result<TimerReport>>,
+    handle: thread::JoinHandle<Result<(TimerReport, DiscordPresence)>>,
     updates: mpsc::Receiver<String>,
 }
 
@@ -1843,6 +1897,7 @@ impl App {
             preview_offset: 0,
             show_log: false,
             action_log: Vec::new(),
+            sleep_presence: None,
         }
     }
 
@@ -2492,6 +2547,11 @@ impl App {
     }
 
     fn stop_timer(&mut self) {
+        // A new run replaces any retained post-countdown status; stopping
+        // clears it explicitly so Discord never shows stale sleep state.
+        if let Some(presence) = self.sleep_presence.take() {
+            presence.clear();
+        }
         if let Some(timer) = self.timer.take() {
             timer.stop.store(true, Ordering::Relaxed);
             let result = timer.handle.join();
@@ -2520,9 +2580,17 @@ impl App {
         }
     }
 
-    fn apply_timer_result(&mut self, result: thread::Result<Result<TimerReport>>) {
+    fn apply_timer_result(
+        &mut self,
+        result: thread::Result<Result<(TimerReport, DiscordPresence)>>,
+    ) {
         match result {
-            Ok(Ok(report)) => {
+            Ok(Ok((report, sleep_presence))) => {
+                // Retain the disarmed post-countdown guard while the TUI stays
+                // open so `Sleeping for ...` (or `finished`) remains visible.
+                // Dropping `App` closes the IPC connection and lets Discord
+                // clear it; `stop_timer` clears it explicitly on stop/quit.
+                self.sleep_presence = Some(sleep_presence);
                 self.show_log = true;
                 self.preview_offset = 0;
                 let status = if report.failures.is_empty() {
@@ -3458,7 +3526,7 @@ mod tests {
             sender,
             pending: String::new(),
         };
-        let report = run_timer(
+        let (report, _presence) = run_timer(
             &config,
             &Arc::new(AtomicBool::new(false)),
             &Arc::new(AtomicBool::new(false)),
@@ -3760,7 +3828,7 @@ mod tests {
         config.actions.custom.commands = vec!["false".to_string(), "true".to_string()];
         let mut output = Vec::new();
 
-        let report = run_timer(
+        let (report, _presence) = run_timer(
             &config,
             &stop,
             &Arc::new(AtomicBool::new(false)),
@@ -4110,7 +4178,7 @@ mod tests {
         drop(presence);
 
         let started = Instant::now();
-        let report = run_timer(
+        let (report, _presence) = run_timer(
             &config,
             &Arc::new(AtomicBool::new(false)),
             &Arc::new(AtomicBool::new(false)),
@@ -4249,7 +4317,9 @@ mod tests {
         drop(presence);
 
         // CLI and TUI runs share `run_timer`, so countdown publishing covers
-        // --no-actions and dry-run behavior on both paths.
+        // --no-actions and dry-run behavior on both paths. These runs have no
+        // enabled actions, so they keep the accurate `finished` state instead
+        // of claiming a sleep interval (US-004).
         for (mode, options) in [
             (
                 RunMode::Cli,
@@ -4271,7 +4341,7 @@ mod tests {
             config.discord.enabled = true;
             config.discord.application_id = "123456789012345678".to_string();
             let started = Instant::now();
-            let report = run_timer(
+            let (report, presence) = run_timer(
                 &config,
                 &Arc::new(AtomicBool::new(false)),
                 &Arc::new(AtomicBool::new(false)),
@@ -4283,7 +4353,180 @@ mod tests {
             .unwrap();
             assert!(started.elapsed() < Duration::from_secs(10));
             assert!(report.failures.is_empty());
+            // Returned guard keeps the IPC connection open for retention.
+            assert!(presence.is_active());
         }
+    }
+
+    #[test]
+    fn sleeping_presence_shows_elapsed_start_without_end() {
+        let duration = Duration::from_secs(25 * 60);
+        let activity = sleeping_presence(1_700_000_000, duration);
+        assert_eq!(activity.details, "Sleep timer");
+        assert_eq!(
+            activity.state,
+            format!("Sleeping for {}", format_duration(duration))
+        );
+        assert!(activity.state.starts_with("Sleeping for "));
+        assert_eq!(activity.start_timestamp, Some(1_700_000_000));
+        assert_eq!(activity.end_timestamp, None);
+
+        let payload = presence_activity_payload(&activity, 1234, "nonce-s1");
+        assert_eq!(
+            payload["args"]["activity"]["timestamps"]["start"],
+            1_700_000_000
+        );
+        assert!(
+            payload["args"]["activity"]["timestamps"]
+                .get("end")
+                .is_none(),
+            "sleeping state must not carry a countdown end timestamp"
+        );
+    }
+
+    #[test]
+    fn post_run_presence_only_claims_sleep_for_real_success() {
+        let duration = Duration::from_secs(1500);
+        let sleeping = post_run_presence(TimerOptions::default(), false, true, 1000, duration);
+        assert_eq!(sleeping.state, "Sleeping for 25m0s");
+        assert_eq!(sleeping.start_timestamp, Some(1000));
+        assert_eq!(sleeping.end_timestamp, None);
+
+        // Every non-sleep case keeps the accurate timestamp-free finished state.
+        for options in [
+            TimerOptions {
+                dry_run: true,
+                ..TimerOptions::default()
+            },
+            TimerOptions {
+                no_actions: true,
+                ..TimerOptions::default()
+            },
+            TimerOptions {
+                dry_run: true,
+                no_actions: true,
+            },
+        ] {
+            let activity = post_run_presence(options, false, true, 1000, duration);
+            assert_eq!(activity, post_countdown_presence());
+        }
+        assert_eq!(
+            post_run_presence(TimerOptions::default(), true, true, 1000, duration),
+            post_countdown_presence(),
+            "failures must not claim a sleep interval"
+        );
+        assert_eq!(
+            post_run_presence(TimerOptions::default(), false, false, 1000, duration),
+            post_countdown_presence(),
+            "empty action list must not claim a sleep interval"
+        );
+    }
+
+    #[test]
+    fn successful_real_actions_return_sleeping_guard_while_others_stay_finished() {
+        // Real successful action run transitions to the sleeping state and
+        // returns a disarmed, still-active guard for retention.
+        let mut sleep_config = quiet_config("10ms");
+        sleep_config.discord.enabled = true;
+        sleep_config.discord.application_id = "123456789012345678".to_string();
+        sleep_config.actions.custom.enabled = true;
+        sleep_config.actions.custom.commands = vec!["true".to_string()];
+        let (report, presence) = run_timer(
+            &sleep_config,
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicU64::new(0)),
+            RunMode::Cli,
+            TimerOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert!(report.failures.is_empty());
+        assert!(!report.actions.is_empty());
+        assert!(presence.is_active());
+        drop(presence);
+
+        // Failed actions must not claim a sleep interval.
+        let mut failed_config = quiet_config("10ms");
+        failed_config.discord.enabled = true;
+        failed_config.discord.application_id = "123456789012345678".to_string();
+        failed_config.actions.custom.enabled = true;
+        failed_config.actions.custom.commands = vec!["false".to_string()];
+        let (failed_report, failed_presence) = run_timer(
+            &failed_config,
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicU64::new(0)),
+            RunMode::Cli,
+            TimerOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(failed_report.failures.len(), 1);
+        assert!(failed_presence.is_active());
+        drop(failed_presence);
+
+        // --no-actions and dry-run never claim a sleep interval, even with
+        // enabled actions configured.
+        for options in [
+            TimerOptions {
+                no_actions: true,
+                ..TimerOptions::default()
+            },
+            TimerOptions {
+                dry_run: true,
+                ..TimerOptions::default()
+            },
+        ] {
+            let mut config = quiet_config("10ms");
+            config.discord.enabled = true;
+            config.discord.application_id = "123456789012345678".to_string();
+            config.actions.custom.enabled = true;
+            config.actions.custom.commands = vec!["true".to_string()];
+            let (report, presence) = run_timer(
+                &config,
+                &Arc::new(AtomicBool::new(false)),
+                &Arc::new(AtomicBool::new(false)),
+                &Arc::new(AtomicU64::new(0)),
+                RunMode::Cli,
+                options,
+                None,
+            )
+            .unwrap();
+            assert!(report.failures.is_empty());
+            assert!(presence.is_active());
+            drop(presence);
+        }
+    }
+
+    #[test]
+    fn tui_retains_sleeping_guard_until_stop_and_clears_on_stop() {
+        // Completion stores the disarmed guard on the App for retention while
+        // the TUI stays open; stopping clears it explicitly.
+        let mut app = App::new(PathBuf::from("/tmp/sleep-retain.yaml"), quiet_config("25m"));
+        assert!(app.sleep_presence.is_none());
+        let guard = DiscordPresence::start(&DiscordConfig {
+            enabled: true,
+            application_id: "123456789012345678".to_string(),
+        });
+        assert!(guard.is_active());
+        app.apply_timer_result(Ok(Ok((
+            TimerReport {
+                started_at: 0,
+                duration: Duration::from_secs(60),
+                actions: vec!["true".to_string()],
+                failures: Vec::new(),
+                dry_run: false,
+                no_actions: false,
+            },
+            guard,
+        ))));
+        assert!(app.sleep_presence.is_some());
+        assert!(app.sleep_presence.as_ref().is_some_and(|p| p.is_active()));
+        // `stop_timer` with no running timer clears the retained guard.
+        app.stop_timer();
+        assert!(app.sleep_presence.is_none());
+        assert_eq!(app.status, "timer stopped");
     }
 
     fn visible_field_keys(config: &Config) -> Vec<FieldKey> {
@@ -4296,14 +4539,20 @@ mod tests {
     fn dummy_timer_state() -> TimerState {
         let stop = Arc::new(AtomicBool::new(false));
         let handle = thread::spawn(|| {
-            Ok(TimerReport {
-                started_at: 0,
-                duration: Duration::from_secs(1),
-                actions: Vec::new(),
-                failures: Vec::new(),
-                dry_run: false,
-                no_actions: false,
-            })
+            Ok((
+                TimerReport {
+                    started_at: 0,
+                    duration: Duration::from_secs(1),
+                    actions: Vec::new(),
+                    failures: Vec::new(),
+                    dry_run: false,
+                    no_actions: false,
+                },
+                DiscordPresence {
+                    sender: None,
+                    clear_on_drop: true,
+                },
+            ))
         });
         let (_, updates) = mpsc::channel();
         TimerState {

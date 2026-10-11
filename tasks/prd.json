@@ -92,14 +92,15 @@
         "Isolated CLI smoke checks pass: initialize a temporary config, then run validate, status, and preview against it."
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "",
       "dependsOn": [
         "US-003"
-      ]
+      ],
+      "completionNotes": "Completed by agent"
     }
   ],
   "metadata": {
-    "updatedAt": "2026-10-11T15:18:23.822Z"
+    "updatedAt": "2026-10-11T15:21:51.255Z"
   }
 }

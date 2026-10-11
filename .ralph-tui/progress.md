@@ -79,3 +79,27 @@ Learnings:
 - `Drop`-always-clears conflicts with retain-on-success; fix with `clear_on_drop` flag + `disarm()` on success and no worker final clear (explicit Clear only on stop paths).
 - Throttle Discord updates (>=5s) inside the 250ms countdown loop; publish immediately on pause entry and on resume to avoid stale countdown text.
 - End timestamp must be recomputed as `now_unix + remaining` per publish so the deadline stays fixed as remaining shrinks.
+
+---
+
+## US-004: Publish post-countdown sleep status and document setup — PASS
+
+Implemented elapsed `Sleeping for ...` presence with retention across CLI wake-confirmation and TUI open lifetime.
+
+Files changed:
+- `src/main.rs`: added pure `sleeping_presence(start_unix, duration)` (`Sleep timer` + `Sleeping for {duration}` + start-only timestamp) and pure `post_run_presence()` selector (sleeping only for real successful non-empty action runs; dry-run/`--no-actions`/failures/empty keep timestamp-free `finished`); `run_timer` captures `sleep_start_unix` at action-phase start, publishes via selector, disarms, and returns `(TimerReport, DiscordPresence)` so the caller retains the IPC connection (Discord clears on process exit/poweroff); CLI holds the guard through `prompt_wake_confirmation`; TUI `App` gained `sleep_presence: Option<DiscordPresence>`, `TimerState` handle returns the tuple, `apply_timer_result` stores the guard, `stop_timer` clears retained presence explicitly (covers cancel + clean quit); `DiscordPresence` derived `Debug` for tuple `unwrap_err`; updated existing `run_timer` call sites; 4 new tests.
+- `README.md`: added `Discord Rich Presence` section (Application ID setup, config keys table, disable option, displayed-states table with timestamps, poweroff exact-match note, lifetime + unavailable-Discord behavior).
+
+Check results:
+- `cargo fmt --check` — PASS (exit 0, after `cargo fmt`)
+- `cargo test --locked` — PASS (50 passed, 1 ignored)
+- `cargo clippy --locked -- -D warnings` — PASS (exit 0)
+- `cargo build --release --locked` — PASS
+- Isolated CLI smoke (`init`, `validate`, `status`, `preview` on temp config) — PASS; config serializes `discord: { enabled: true, application_id: "" }`
+- Manual `run --no-actions 1s` with fake app id and no Discord socket — PASS (exit 0, no stall)
+- Manual real-action `run 1s` (custom `true`) with fake app id — PASS (exit 0, published sleeping path, no stall)
+
+Learnings:
+- Retention requires transferring the presence guard out of `run_timer`; `mem::forget`/parking the worker leaks a thread per run, while returning `(TimerReport, DiscordPresence)` lets CLI hold it through wake-confirmation and TUI store it until stop/quit with no accumulation.
+- `unwrap_err()` on `Result<(TimerReport, DiscordPresence)>` needs `Debug` on both tuple elements; derive `Debug` on `DiscordPresence` (sender + bool are already `Debug`).
+- Empty-action real runs must not claim sleep: `post_run_presence` requires `has_actions`, keeping the status accurate for countdown-only configs.

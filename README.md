@@ -245,6 +245,73 @@ Dangerous actions such as `pkill`, power actions, and common destructive custom 
 Completed timer sessions are appended to `history.yaml` next to the active config file.
 If no poweroff or reboot action is configured, CLI `run` asks for wake confirmation after the timer finishes and records the elapsed sleep time.
 
+## Discord Rich Presence
+
+Timer runs can publish status to the local Discord desktop client through
+Discord local IPC. No bot token, network service, or account credentials are
+used.
+
+### Application ID setup
+
+1. Create an application in the Discord Developer Portal and copy its
+   **Application ID**. The ID is public configuration, not a secret. Do not
+   commit a personal ID.
+2. Put the ID in the config file:
+
+   ```yaml
+   discord:
+     enabled: true
+     application_id: "123456789012345678"
+   ```
+
+3. Keep the Discord desktop client running on the same machine. No connection
+   is attempted until a non-empty Application ID is configured.
+
+### Configuration keys
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `discord.enabled` | `true` | Master switch for Rich Presence. |
+| `discord.application_id` | `""` | Discord Application ID. Empty means disabled. |
+
+Both fields are editable in the TUI **More** group as **discord enabled** and
+**discord app id**. Existing config files without a `discord` section load
+with the defaults above. To disable presence, set `discord.enabled: false` or
+leave `application_id` empty; either way no IPC connection is attempted.
+
+### Displayed states
+
+`details` stays `Sleep timer`. `state` and timestamps change by phase:
+
+| Phase | State | Timestamps |
+| --- | --- | --- |
+| Running | `<remaining> until sleep`, for example `25m0s until sleep` | Countdown end timestamp |
+| Running with `actions.power.mode: poweroff` | `<remaining> until sleep • Power off after timer` | Countdown end timestamp |
+| Paused | `paused` (plus the poweroff suffix only for exact `poweroff`) | None, so no stale countdown is shown |
+| After successful real actions | `Sleeping for <duration>`, for example `Sleeping for 25m0s` | Start timestamp at the beginning of post-countdown actions, so Discord shows elapsed sleep time |
+| Dry-run, `--no-actions`, action failures, or no enabled actions | `finished` | None, so no sleep interval is claimed |
+| Stopped or cancelled | Presence is cleared | — |
+
+The `Power off after timer` suffix appears only when `actions.power.mode` is
+exactly `poweroff`. It is omitted for `none`, `suspend`, `hibernate`,
+`hybrid-sleep`, `reboot`, and every other value.
+
+### Lifetime and unavailable Discord
+
+- The countdown status is published by both CLI `run` and TUI timer runs,
+  including `--no-actions` and dry-run runs.
+- After a successful real-action run, the elapsed `Sleeping for …` status
+  stays active while the TUI remains open and during the CLI
+  wake-confirmation wait. Discord clears it when the process exits or the
+  machine powers off or suspends.
+- Cancelling a run clears the presence. Quitting the TUI after a completed
+  run clears the retained status; otherwise it is retained until the app
+  exits.
+- When Discord is closed, missing, or unreachable, the timer behaves exactly
+  as without Discord. IPC connects in a background thread with short
+  timeouts, updates never block the countdown or action runner, and all
+  connection and send failures are ignored.
+
 ## Development
 
 ```bash
