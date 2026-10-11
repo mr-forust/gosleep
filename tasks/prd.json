@@ -1,0 +1,105 @@
+{
+  "name": "Discord Rich Presence for gosleep-timer",
+  "description": "Add optional, non-blocking Discord Rich Presence for CLI and TUI timer phases.",
+  "branchName": "ralph/discord-rich-presence",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Configure Discord Rich Presence",
+      "description": "As a user, I want to configure and disable Discord Rich Presence so that I control whether gosleep-timer publishes my timer status.",
+      "acceptanceCriteria": [
+        "Add a backward-compatible Discord configuration section with an enabled setting and Discord Application ID.",
+        "Presence is enabled by default, but no connection is attempted until a non-empty Application ID is configured.",
+        "Expose the enable toggle and Application ID through the existing TUI configuration editor.",
+        "Existing YAML configurations without the new section continue to load with defaults.",
+        "Add focused tests for defaults, old configuration deserialization, and editing/applying the new fields.",
+        "cargo fmt --check passes",
+        "cargo test --locked passes",
+        "cargo clippy --locked -- -D warnings passes",
+        "cargo build --release --locked passes",
+        "Isolated CLI smoke checks pass: initialize a temporary config, then run validate, status, and preview against it."
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-002",
+      "title": "Add a non-blocking Discord presence client",
+      "description": "As a user, I want gosleep-timer to connect to Discord's local Rich Presence interface so that my timer status appears when the Discord desktop client is available.",
+      "acceptanceCriteria": [
+        "Use Discord local IPC for Rich Presence; do not add a bot token, network service, or account credentials.",
+        "Reuse or add the smallest maintained Rust dependency that supports the repository's Rust version; keep Cargo.lock committed.",
+        "A missing Discord client, unavailable IPC socket, or connection failure does not fail or stall a timer run.",
+        "Presence updates and cleanup do not block the countdown or action runner.",
+        "Add deterministic tests for presence payload formatting and the disabled/unconfigured no-op behavior.",
+        "cargo fmt --check passes",
+        "cargo test --locked passes",
+        "cargo clippy --locked -- -D warnings passes",
+        "cargo build --release --locked passes",
+        "Isolated CLI smoke checks pass: initialize a temporary config, then run validate, status, and preview against it."
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-001"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-003",
+      "title": "Publish countdown status in CLI and TUI",
+      "description": "As a user, I want Discord to show how long remains until the timer activates so that others can see when my sleep actions are due.",
+      "acceptanceCriteria": [
+        "While running, show Sleep timer and a state such as 45m until sleep, with a countdown end timestamp where supported.",
+        "When paused, show a paused state and do not leave a stale countdown timestamp.",
+        "Show Power off after timer only when actions.power.mode is exactly poweroff; omit it for every other setting.",
+        "Support CLI run and TUI timer runs, including --no-actions and dry-run behavior.",
+        "Clear countdown presence when a run is stopped; transition to the post-countdown state on successful completion instead of clearing it.",
+        "Add tests for CLI/TUI status projection, paused status, remaining time, and poweroff visibility.",
+        "cargo fmt --check passes",
+        "cargo test --locked passes",
+        "cargo clippy --locked -- -D warnings passes",
+        "cargo build --release --locked passes",
+        "Isolated CLI smoke checks pass: initialize a temporary config, then run validate, status, and preview against it."
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-002"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-004",
+      "title": "Publish post-countdown sleep status and document setup",
+      "description": "As a user, I want Discord to show Sleeping for … after the timer activates so that the presence reflects the current phase.",
+      "acceptanceCriteria": [
+        "After the countdown and configured actions complete, publish Sleeping for … with an elapsed-time timestamp measured from the start of post-countdown actions.",
+        "Keep the status accurate when actions fail; do not claim a sleep interval for --no-actions or dry-run runs.",
+        "Keep the elapsed status active in the TUI while it remains open and during the CLI wake-confirmation wait; let Discord clear it when the process exits or the machine powers off.",
+        "Clear presence when the run is cancelled or the application exits cleanly; retain the post-countdown status while the TUI remains open.",
+        "Document Discord Application ID setup, configuration keys, disable option, displayed states, and behavior when Discord is unavailable in README.md.",
+        "Add tests for transition to the post-countdown phase and cleanup on stop/completion.",
+        "cargo fmt --check passes",
+        "cargo test --locked passes",
+        "cargo clippy --locked -- -D warnings passes",
+        "cargo build --release --locked passes",
+        "Isolated CLI smoke checks pass: initialize a temporary config, then run validate, status, and preview against it."
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "",
+      "dependsOn": [
+        "US-003"
+      ]
+    }
+  ],
+  "metadata": {
+    "updatedAt": "2026-10-11T15:18:23.822Z"
+  }
+}

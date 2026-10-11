@@ -1,0 +1,14 @@
+{
+  "id": "4117981a-c4d7-4e08-a110-df92570e5385",
+  "status": "running",
+  "startedAt": "2026-10-11T15:10:44.414Z",
+  "updatedAt": "2026-10-11T15:15:46.591Z",
+  "agentPlugin": "opencode",
+  "trackerPlugin": "json",
+  "executionScopes": [],
+  "currentIteration": 2,
+  "maxIterations": 10,
+  "totalTasks": 0,
+  "tasksCompleted": 2,
+  "cwd": "/home/forust/gosleep-timer"
+}

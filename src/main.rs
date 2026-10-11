@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, Write},
+    io::{self, Read as _, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -68,6 +68,7 @@ struct Config {
     duration: String,
     inhibit_sleep: bool,
     actions: Actions,
+    discord: DiscordConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -158,6 +159,350 @@ struct CustomAction {
     commands: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct DiscordConfig {
+    enabled: bool,
+    application_id: String,
+}
+
+impl Default for DiscordConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            application_id: String::new(),
+        }
+    }
+}
+
+impl DiscordConfig {
+    fn should_connect(&self) -> bool {
+        self.enabled && !self.application_id.trim().is_empty()
+    }
+}
+
+/// Timer phase published through Discord local IPC (US-003/US-004 own wording).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PresenceActivity {
+    details: String,
+    state: String,
+    start_timestamp: Option<u64>,
+    end_timestamp: Option<u64>,
+}
+
+fn presence_activity_payload(
+    activity: &PresenceActivity,
+    pid: u32,
+    nonce: &str,
+) -> serde_json::Value {
+    let mut timestamps = serde_json::Map::new();
+    if let Some(start) = activity.start_timestamp {
+        timestamps.insert(
+            "start".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(start)),
+        );
+    }
+    if let Some(end) = activity.end_timestamp {
+        timestamps.insert(
+            "end".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(end)),
+        );
+    }
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "details".to_string(),
+        serde_json::Value::String(activity.details.clone()),
+    );
+    fields.insert(
+        "state".to_string(),
+        serde_json::Value::String(activity.state.clone()),
+    );
+    if !timestamps.is_empty() {
+        fields.insert(
+            "timestamps".to_string(),
+            serde_json::Value::Object(timestamps),
+        );
+    }
+    serde_json::json!({
+        "cmd": "SET_ACTIVITY",
+        "args": {
+            "pid": pid,
+            "activity": fields,
+        },
+        "nonce": nonce,
+    })
+}
+
+fn presence_clear_payload(pid: u32, nonce: &str) -> serde_json::Value {
+    serde_json::json!({
+        "cmd": "SET_ACTIVITY",
+        "args": {
+            "pid": pid,
+            "activity": null,
+        },
+        "nonce": nonce,
+    })
+}
+
+fn encode_discord_ipc_frame(opcode: u32, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(8 + payload.len());
+    frame.extend_from_slice(&opcode.to_le_bytes());
+    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+fn discord_ipc_candidates_from(bases: &[PathBuf]) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for base in bases {
+        for index in 0..10 {
+            candidates.push(base.join(format!("discord-ipc-{index}")));
+        }
+    }
+    candidates
+}
+
+fn discord_ipc_candidates() -> Vec<PathBuf> {
+    let mut bases = Vec::new();
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+        let base = PathBuf::from(runtime);
+        if !base.as_os_str().is_empty() {
+            bases.push(base);
+        }
+    }
+    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        let base = PathBuf::from(tmpdir);
+        if !base.as_os_str().is_empty() {
+            bases.push(base);
+        }
+    }
+    bases.push(PathBuf::from("/tmp"));
+    let mut seen = std::collections::HashSet::new();
+    bases.retain(|base| seen.insert(base.clone()));
+    discord_ipc_candidates_from(&bases)
+}
+
+#[derive(Debug)]
+enum PresenceRequest {
+    Update(PresenceActivity),
+    Clear,
+}
+
+/// Pure countdown projection for US-003.
+///
+/// Running presence shows `Sleep timer` with `{remaining} until sleep` and a
+/// countdown end timestamp. `Power off after timer` is appended only when the
+/// power mode is exactly `poweroff`.
+fn should_show_poweroff(power_mode: &str) -> bool {
+    power_mode == "poweroff"
+}
+
+fn countdown_presence(remaining: Duration, power_mode: &str, now_unix: u64) -> PresenceActivity {
+    let mut state = format!("{} until sleep", format_duration(remaining));
+    if should_show_poweroff(power_mode) {
+        state.push_str(" \u{2022} Power off after timer");
+    }
+    PresenceActivity {
+        details: "Sleep timer".to_string(),
+        state,
+        start_timestamp: None,
+        end_timestamp: Some(now_unix.saturating_add(remaining.as_secs())),
+    }
+}
+
+/// Paused projection: same details line, `paused` state, and no timestamps so
+/// Discord never shows a stale live countdown while paused.
+fn paused_presence(power_mode: &str) -> PresenceActivity {
+    let mut state = "paused".to_string();
+    if should_show_poweroff(power_mode) {
+        state.push_str(" \u{2022} Power off after timer");
+    }
+    PresenceActivity {
+        details: "Sleep timer".to_string(),
+        state,
+        start_timestamp: None,
+        end_timestamp: None,
+    }
+}
+
+/// Post-countdown transitional state published on successful completion
+/// instead of clearing. US-004 replaces this with the elapsed `Sleeping for`
+/// status and extends the presence lifetime; US-003 only guarantees the
+/// countdown is not cleared on success.
+fn post_countdown_presence() -> PresenceActivity {
+    PresenceActivity {
+        details: "Sleep timer".to_string(),
+        state: "finished".to_string(),
+        start_timestamp: None,
+        end_timestamp: None,
+    }
+}
+
+/// Non-blocking Discord Rich Presence client over local IPC.
+///
+/// `start` never blocks the caller: the socket handshake runs on a background
+/// thread with short timeouts, and `update`/`clear` only enqueue on an
+/// unbounded channel. Missing Discord, a missing socket, or any I/O failure
+/// is swallowed so timer runs never fail or stall. Dropping the client closes
+/// the channel; the worker attempts one final clear in the background.
+struct DiscordPresence {
+    sender: Option<mpsc::Sender<PresenceRequest>>,
+    clear_on_drop: bool,
+}
+
+impl DiscordPresence {
+    fn start(config: &DiscordConfig) -> Self {
+        if !config.should_connect() {
+            return Self {
+                sender: None,
+                clear_on_drop: true,
+            };
+        }
+        let application_id = config.application_id.trim().to_string();
+        if application_id.is_empty() {
+            return Self {
+                sender: None,
+                clear_on_drop: true,
+            };
+        }
+        let (sender, requests) = mpsc::channel();
+        thread::spawn(move || discord_presence_worker(&application_id, requests));
+        Self {
+            sender: Some(sender),
+            clear_on_drop: true,
+        }
+    }
+
+    // Used by tests to assert no-op vs active; US-003/004 will branch on it.
+    #[allow(dead_code)]
+    fn is_active(&self) -> bool {
+        self.sender.is_some()
+    }
+
+    // Countdown (US-003) and post-countdown (US-004) updates; non-blocking.
+    fn update(&self, activity: PresenceActivity) {
+        if let Some(sender) = &self.sender {
+            let _ = sender.send(PresenceRequest::Update(activity));
+        }
+    }
+
+    fn clear(&self) {
+        if let Some(sender) = &self.sender {
+            let _ = sender.send(PresenceRequest::Clear);
+        }
+    }
+
+    /// Stop the automatic clear on drop. Used on successful completion so the
+    /// countdown transitions to the post-countdown state instead of clearing.
+    fn disarm(&mut self) {
+        self.clear_on_drop = false;
+    }
+}
+
+impl Drop for DiscordPresence {
+    fn drop(&mut self) {
+        // Best-effort clear in the background, then close the channel so the
+        // worker exits. No join here so countdown/action paths never block.
+        // Disarmed on success so the post-countdown state is retained.
+        if self.clear_on_drop {
+            self.clear();
+        }
+        self.sender.take();
+    }
+}
+
+fn discord_presence_worker(application_id: &str, requests: mpsc::Receiver<PresenceRequest>) {
+    let mut stream = discord_connect(application_id);
+    let pid = std::process::id();
+    for request in requests {
+        let Some(socket) = stream.as_mut() else {
+            continue;
+        };
+        let payload = match &request {
+            PresenceRequest::Update(activity) => {
+                presence_activity_payload(activity, pid, &next_presence_nonce())
+            }
+            PresenceRequest::Clear => presence_clear_payload(pid, &next_presence_nonce()),
+        };
+        if discord_send_activity(socket, &payload).is_err() {
+            stream = None;
+        }
+    }
+    // No final clear here: `Drop` already sends an explicit `Clear` when the
+    // run is stopped, and a disarmed guard (successful completion) must retain
+    // the post-countdown state instead of wiping it. Discord clears stale
+    // presence itself once the process exits and the socket closes.
+}
+
+fn discord_connect(application_id: &str) -> Option<std::os::unix::net::UnixStream> {
+    use std::os::unix::net::UnixStream;
+    for path in discord_ipc_candidates() {
+        let Ok(stream) = UnixStream::connect(&path) else {
+            continue;
+        };
+        if discord_handshake(&stream, application_id).is_ok() {
+            return Some(stream);
+        }
+    }
+    None
+}
+
+fn discord_handshake(
+    stream: &std::os::unix::net::UnixStream,
+    application_id: &str,
+) -> io::Result<()> {
+    let mut stream = stream.try_clone()?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let payload = serde_json::json!({
+        "v": 1,
+        "client_id": application_id,
+    });
+    let bytes = serde_json::to_vec(&payload)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let frame = encode_discord_ipc_frame(0, &bytes);
+    stream.write_all(&frame)?;
+    // Best effort: consume the READY reply when Discord answers, but a missing
+    // or slow reply must not fail the worker; updates will fail later if the
+    // handshake did not actually succeed.
+    let mut header = [0_u8; 8];
+    match stream.read_exact(&mut header) {
+        Ok(()) => {
+            let len = u32::from_le_bytes(header[4..8].try_into().unwrap_or([0; 4])) as usize;
+            if len <= 64 * 1024 {
+                let mut body = vec![0_u8; len];
+                let _ = stream.read_exact(&mut body);
+            }
+            Ok(())
+        }
+        Err(err)
+            if err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::TimedOut =>
+        {
+            Ok(())
+        }
+        Err(_) => Ok(()),
+    }
+}
+
+fn discord_send_activity(
+    stream: &mut std::os::unix::net::UnixStream,
+    payload: &serde_json::Value,
+) -> io::Result<()> {
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let bytes = serde_json::to_vec(payload)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let frame = encode_discord_ipc_frame(1, &bytes);
+    stream.write_all(&frame)?;
+    Ok(())
+}
+
+fn next_presence_nonce() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("gosleep-{}-{count}", unix_timestamp())
+}
+
 #[derive(Debug, Clone)]
 struct ActionCommand {
     label: &'static str,
@@ -210,6 +555,7 @@ impl Default for Config {
             duration: "25m".to_string(),
             inhibit_sleep: false,
             actions: Actions::default(),
+            discord: DiscordConfig::default(),
         }
     }
 }
@@ -676,6 +1022,7 @@ fn normalize_config(config: &mut Config) {
     if config.actions.power.mode.is_empty() {
         config.actions.power.mode = "none".to_string();
     }
+    config.discord.application_id = config.discord.application_id.trim().to_string();
 }
 
 fn validate_config(config: &Config) -> Result<()> {
@@ -1086,6 +1433,20 @@ fn run_timer(
 ) -> Result<TimerReport> {
     validate_config(config)?;
     let duration = parse_duration(&config.duration)?;
+    // Local IPC only: no bot token, network service, or credentials. The
+    // worker connects in the background; missing Discord never fails/stalls.
+    // Countdown updates (US-003) are published from this thread for both CLI
+    // and TUI runs, including --no-actions and dry-run. Stopped runs clear
+    // explicitly; successful runs transition to the post-countdown state and
+    // disarm the drop-clear (US-004 extends the lifetime past this guard).
+    let mut discord = DiscordPresence::start(&config.discord);
+    discord.update(countdown_presence(
+        duration,
+        &config.actions.power.mode,
+        unix_timestamp(),
+    ));
+    let mut last_presence_update = Instant::now();
+    let mut presence_paused = false;
     let started_at = unix_timestamp();
     let started = Instant::now();
     let mut remaining = duration;
@@ -1119,10 +1480,15 @@ fn run_timer(
             if let Some(output) = output.as_deref_mut() {
                 write_timer_line(output, "stopped")?;
             }
+            discord.clear();
             bail!(TIMER_STOPPED_MSG);
         }
 
         if pause.load(Ordering::Relaxed) {
+            if !presence_paused {
+                discord.update(paused_presence(&config.actions.power.mode));
+                presence_paused = true;
+            }
             last_tick = Instant::now();
             thread::sleep(Duration::from_millis(250));
             continue;
@@ -1140,6 +1506,22 @@ fn run_timer(
         if remaining.is_zero() {
             break;
         }
+        if presence_paused {
+            discord.update(countdown_presence(
+                remaining,
+                &config.actions.power.mode,
+                unix_timestamp(),
+            ));
+            last_presence_update = Instant::now();
+            presence_paused = false;
+        } else if last_presence_update.elapsed() >= Duration::from_secs(5) {
+            discord.update(countdown_presence(
+                remaining,
+                &config.actions.power.mode,
+                unix_timestamp(),
+            ));
+            last_presence_update = Instant::now();
+        }
         if mode == RunMode::Cli
             && let Some(output) = output.as_deref_mut()
         {
@@ -1156,6 +1538,7 @@ fn run_timer(
         if let Some(output) = output.as_deref_mut() {
             write_timer_line(output, "stopped")?;
         }
+        discord.clear();
         bail!("timer stopped");
     }
 
@@ -1173,6 +1556,7 @@ fn run_timer(
             if let Some(output) = output.as_deref_mut() {
                 write_timer_line(output, "stopped")?;
             }
+            discord.clear();
             break;
         }
         if let Some(output) = output.as_deref_mut() {
@@ -1193,8 +1577,14 @@ fn run_timer(
         }
     }
     if stop.load(Ordering::Relaxed) {
+        discord.clear();
         bail!(TIMER_STOPPED_MSG);
     }
+    // Successful completion transitions to the post-countdown state instead
+    // of clearing, so Discord keeps showing the finished status until the
+    // process exits (CLI) or US-004 publishes the elapsed sleep status.
+    discord.update(post_countdown_presence());
+    discord.disarm();
     let report = TimerReport {
         started_at,
         duration,
@@ -1986,6 +2376,9 @@ impl App {
                 FieldKey::LockCommand => self.config.actions.lock.command = value,
                 FieldKey::MonitorCommand => self.config.actions.monitor.command = value,
                 FieldKey::NotifyMessage => self.config.actions.notify.message = value,
+                FieldKey::DiscordApplicationId => {
+                    self.config.discord.application_id = value.trim().to_string()
+                }
                 _ => {}
             },
             FieldKind::Int => {
@@ -2207,6 +2600,8 @@ impl App {
             FieldKey::PowerMode => self.config.actions.power.mode.clone(),
             FieldKey::CustomEnabled => on_off(self.config.actions.custom.enabled),
             FieldKey::CustomCommands => self.config.actions.custom.commands.join(";"),
+            FieldKey::DiscordEnabled => on_off(self.config.discord.enabled),
+            FieldKey::DiscordApplicationId => self.config.discord.application_id.clone(),
         }
     }
 
@@ -2243,6 +2638,7 @@ impl App {
             FieldKey::CustomEnabled => {
                 self.config.actions.custom.enabled = !self.config.actions.custom.enabled
             }
+            FieldKey::DiscordEnabled => self.config.discord.enabled = !self.config.discord.enabled,
             _ => {}
         }
     }
@@ -2320,6 +2716,8 @@ enum FieldKey {
     PowerMode,
     CustomEnabled,
     CustomCommands,
+    DiscordEnabled,
+    DiscordApplicationId,
 }
 
 const FIELDS: &[Field] = &[
@@ -2469,6 +2867,16 @@ const FIELDS: &[Field] = &[
         key: FieldKey::CustomCommands,
         kind: FieldKind::Semi,
     },
+    Field {
+        label: "discord enabled",
+        key: FieldKey::DiscordEnabled,
+        kind: FieldKind::Bool,
+    },
+    Field {
+        label: "discord app id",
+        key: FieldKey::DiscordApplicationId,
+        kind: FieldKind::Edit,
+    },
 ];
 
 fn visible_fields(config: &Config) -> Vec<&'static Field> {
@@ -2503,7 +2911,9 @@ fn field_visible(config: &Config, key: FieldKey) -> bool {
         | FieldKey::NotifyEnabled
         | FieldKey::KillEnabled
         | FieldKey::PowerMode
-        | FieldKey::CustomEnabled => true,
+        | FieldKey::CustomEnabled
+        | FieldKey::DiscordEnabled
+        | FieldKey::DiscordApplicationId => true,
     }
 }
 
@@ -3512,6 +3922,368 @@ mod tests {
             workspace_command(&i3).display(),
             "i3-msg workspace number 3"
         );
+    }
+
+    #[test]
+    fn discord_defaults_to_enabled_without_application_id() {
+        let config = Config::default();
+        assert!(config.discord.enabled);
+        assert!(config.discord.application_id.is_empty());
+        assert!(!config.discord.should_connect());
+    }
+
+    #[test]
+    fn old_config_without_discord_section_loads_defaults() {
+        let config: Config =
+            noyalib::from_str("duration: 25m\ninhibit_sleep: false\nactions: {}\n").unwrap();
+        assert!(config.discord.enabled);
+        assert!(config.discord.application_id.is_empty());
+        assert!(!config.discord.should_connect());
+
+        let configured: Config = noyalib::from_str(
+            "duration: 25m\ndiscord:\n  enabled: false\n  application_id: \"123\"\n",
+        )
+        .unwrap();
+        assert!(!configured.discord.enabled);
+        assert_eq!(configured.discord.application_id, "123");
+        assert!(!configured.discord.should_connect());
+
+        let mut enabled = configured.clone();
+        enabled.discord.enabled = true;
+        assert!(enabled.discord.should_connect());
+    }
+
+    #[test]
+    fn discord_fields_edit_and_apply_through_tui() {
+        let mut app = App::new(PathBuf::from("/tmp/discord.yaml"), Config::default());
+        let keys = visible_field_keys(&app.config);
+        assert!(keys.contains(&FieldKey::DiscordEnabled));
+        assert!(keys.contains(&FieldKey::DiscordApplicationId));
+        assert_eq!(field_group(FieldKey::DiscordEnabled), 4);
+        assert_eq!(field_group(FieldKey::DiscordApplicationId), 4);
+
+        app.toggle_bool(FieldKey::DiscordEnabled);
+        assert!(!app.config.discord.enabled);
+        assert!(!app.config.discord.should_connect());
+        app.toggle_bool(FieldKey::DiscordEnabled);
+        assert!(app.config.discord.enabled);
+
+        let field = *FIELDS
+            .iter()
+            .find(|field| field.key == FieldKey::DiscordApplicationId)
+            .unwrap();
+        app.apply_edit(field, "  123456  ".to_string()).unwrap();
+        assert_eq!(app.config.discord.application_id, "123456");
+        assert!(app.config.discord.should_connect());
+        assert_eq!(app.field_value(&field), "123456");
+
+        let round_trip = noyalib::to_string(&app.config).unwrap();
+        let loaded: Config = noyalib::from_str(&round_trip).unwrap();
+        assert!(loaded.discord.enabled);
+        assert_eq!(loaded.discord.application_id, "123456");
+    }
+
+    #[test]
+    fn discord_activity_payload_formats_details_state_and_timestamps() {
+        let activity = PresenceActivity {
+            details: "Sleep timer".to_string(),
+            state: "45m until sleep".to_string(),
+            start_timestamp: Some(1_700_000_000),
+            end_timestamp: Some(1_700_002_700),
+        };
+        let payload = presence_activity_payload(&activity, 1234, "nonce-1");
+        assert_eq!(payload["cmd"], "SET_ACTIVITY");
+        assert_eq!(payload["args"]["pid"], 1234);
+        assert_eq!(payload["args"]["activity"]["details"], "Sleep timer");
+        assert_eq!(payload["args"]["activity"]["state"], "45m until sleep");
+        assert_eq!(
+            payload["args"]["activity"]["timestamps"]["start"],
+            1_700_000_000
+        );
+        assert_eq!(
+            payload["args"]["activity"]["timestamps"]["end"],
+            1_700_002_700
+        );
+        assert_eq!(payload["nonce"], "nonce-1");
+
+        let minimal = PresenceActivity {
+            details: "Sleep timer".to_string(),
+            state: "paused".to_string(),
+            start_timestamp: None,
+            end_timestamp: None,
+        };
+        let payload = presence_activity_payload(&minimal, 1234, "nonce-2");
+        assert_eq!(payload["args"]["activity"]["details"], "Sleep timer");
+        assert_eq!(payload["args"]["activity"]["state"], "paused");
+        assert!(
+            payload["args"]["activity"].get("timestamps").is_none(),
+            "paused state must not leave a stale countdown timestamp"
+        );
+
+        let clear = presence_clear_payload(1234, "nonce-3");
+        assert_eq!(clear["cmd"], "SET_ACTIVITY");
+        assert!(clear["args"]["activity"].is_null());
+        assert_eq!(clear["nonce"], "nonce-3");
+    }
+
+    #[test]
+    fn discord_ipc_frame_encodes_opcode_and_length_little_endian() {
+        let frame = encode_discord_ipc_frame(1, b"{}");
+        assert_eq!(frame, vec![1, 0, 0, 0, 2, 0, 0, 0, b'{', b'}']);
+
+        let handshake = encode_discord_ipc_frame(0, b"hi");
+        assert_eq!(&handshake[0..4], &0_u32.to_le_bytes());
+        assert_eq!(&handshake[4..8], &2_u32.to_le_bytes());
+        assert_eq!(&handshake[8..], b"hi");
+    }
+
+    #[test]
+    fn discord_ipc_candidates_cover_runtime_and_tmp_sockets() {
+        let bases = vec![PathBuf::from("/run/user/1000"), PathBuf::from("/tmp")];
+        let candidates = discord_ipc_candidates_from(&bases);
+        assert_eq!(candidates.len(), 20);
+        assert_eq!(candidates[0], PathBuf::from("/run/user/1000/discord-ipc-0"));
+        assert_eq!(candidates[9], PathBuf::from("/run/user/1000/discord-ipc-9"));
+        assert_eq!(candidates[10], PathBuf::from("/tmp/discord-ipc-0"));
+        assert_eq!(candidates[19], PathBuf::from("/tmp/discord-ipc-9"));
+    }
+
+    #[test]
+    fn discord_disabled_or_unconfigured_is_noop_without_blocking() {
+        for config in [
+            DiscordConfig {
+                enabled: false,
+                application_id: "123".to_string(),
+            },
+            DiscordConfig {
+                enabled: true,
+                application_id: String::new(),
+            },
+            DiscordConfig {
+                enabled: true,
+                application_id: "   ".to_string(),
+            },
+        ] {
+            assert!(!config.should_connect());
+            let started = Instant::now();
+            let presence = DiscordPresence::start(&config);
+            assert!(!presence.is_active());
+            presence.update(PresenceActivity {
+                details: "Sleep timer".to_string(),
+                state: "45m until sleep".to_string(),
+                start_timestamp: None,
+                end_timestamp: None,
+            });
+            presence.clear();
+            drop(presence);
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "disabled/unconfigured presence must be an instant no-op"
+            );
+        }
+    }
+
+    #[test]
+    fn discord_missing_client_does_not_fail_or_stall_timer() {
+        // No Discord IPC socket exists in the test sandbox; the worker must
+        // swallow the connection failure in the background.
+        let mut config = quiet_config("10ms");
+        config.discord.enabled = true;
+        config.discord.application_id = "123456789012345678".to_string();
+        assert!(config.discord.should_connect());
+
+        let started = Instant::now();
+        let presence = DiscordPresence::start(&config.discord);
+        assert!(presence.is_active());
+        presence.update(PresenceActivity {
+            details: "Sleep timer".to_string(),
+            state: "10ms until sleep".to_string(),
+            start_timestamp: None,
+            end_timestamp: None,
+        });
+        presence.clear();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "presence start/update/clear must not block, got {:?}",
+            started.elapsed()
+        );
+        drop(presence);
+
+        let started = Instant::now();
+        let report = run_timer(
+            &config,
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicU64::new(0)),
+            RunMode::Cli,
+            TimerOptions {
+                no_actions: true,
+                ..TimerOptions::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(report.failures.is_empty());
+    }
+
+    #[test]
+    fn countdown_presence_shows_remaining_with_end_timestamp() {
+        let remaining = Duration::from_secs(45 * 60);
+        let activity = countdown_presence(remaining, "none", 1_700_000_000);
+        assert_eq!(activity.details, "Sleep timer");
+        assert_eq!(
+            activity.state,
+            format!("{} until sleep", format_duration(remaining))
+        );
+        assert_eq!(activity.start_timestamp, None);
+        assert_eq!(
+            activity.end_timestamp,
+            Some(1_700_000_000 + remaining.as_secs())
+        );
+
+        // Payload keeps the live countdown end timestamp.
+        let payload = presence_activity_payload(&activity, 1234, "nonce-c1");
+        assert_eq!(
+            payload["args"]["activity"]["timestamps"]["end"],
+            1_700_000_000 + remaining.as_secs()
+        );
+    }
+
+    #[test]
+    fn paused_presence_has_no_stale_countdown_timestamp() {
+        let activity = paused_presence("none");
+        assert_eq!(activity.details, "Sleep timer");
+        assert_eq!(activity.state, "paused");
+        assert_eq!(activity.start_timestamp, None);
+        assert_eq!(activity.end_timestamp, None);
+
+        let payload = presence_activity_payload(&activity, 1234, "nonce-p1");
+        assert!(
+            payload["args"]["activity"].get("timestamps").is_none(),
+            "paused state must not leave a stale countdown timestamp"
+        );
+    }
+
+    #[test]
+    fn poweroff_indicator_only_for_exact_poweroff_mode() {
+        let running_off = countdown_presence(Duration::from_secs(60), "poweroff", 1000);
+        assert!(
+            running_off.state.contains("Power off after timer"),
+            "poweroff mode must show the indicator, got {:?}",
+            running_off.state
+        );
+        let paused_off = paused_presence("poweroff");
+        assert!(paused_off.state.contains("Power off after timer"));
+
+        for mode in [
+            "none",
+            "suspend",
+            "hibernate",
+            "hybrid-sleep",
+            "reboot",
+            "",
+            "PowerOff",
+            "POWEROFF",
+        ] {
+            let running = countdown_presence(Duration::from_secs(60), mode, 1000);
+            assert!(
+                !running.state.contains("Power off after timer"),
+                "mode {mode:?} must omit the indicator, got {:?}",
+                running.state
+            );
+            let paused = paused_presence(mode);
+            assert!(
+                !paused.state.contains("Power off after timer"),
+                "mode {mode:?} must omit the indicator when paused, got {:?}",
+                paused.state
+            );
+        }
+    }
+
+    #[test]
+    fn stopped_run_clears_presence_without_stalling() {
+        let mut config = quiet_config("10ms");
+        config.discord.enabled = true;
+        config.discord.application_id = "123456789012345678".to_string();
+        let stop = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+        let err = run_timer(
+            &config,
+            &stop,
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicU64::new(0)),
+            RunMode::Cli,
+            TimerOptions {
+                no_actions: true,
+                ..TimerOptions::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), TIMER_STOPPED_MSG);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "stopped run with Discord configured must not stall, got {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn successful_runs_transition_to_post_countdown_instead_of_clearing() {
+        let finished = post_countdown_presence();
+        assert_eq!(finished.details, "Sleep timer");
+        assert_eq!(finished.state, "finished");
+        assert_eq!(finished.start_timestamp, None);
+        assert_eq!(finished.end_timestamp, None);
+
+        // Disarmed guards retain the post-countdown state (no drop-clear).
+        let mut presence = DiscordPresence::start(&DiscordConfig {
+            enabled: true,
+            application_id: "123456789012345678".to_string(),
+        });
+        assert!(presence.is_active());
+        presence.update(countdown_presence(Duration::from_secs(60), "none", 1000));
+        presence.update(post_countdown_presence());
+        presence.disarm();
+        drop(presence);
+
+        // CLI and TUI runs share `run_timer`, so countdown publishing covers
+        // --no-actions and dry-run behavior on both paths.
+        for (mode, options) in [
+            (
+                RunMode::Cli,
+                TimerOptions {
+                    no_actions: true,
+                    ..TimerOptions::default()
+                },
+            ),
+            (
+                RunMode::Cli,
+                TimerOptions {
+                    dry_run: true,
+                    ..TimerOptions::default()
+                },
+            ),
+            (RunMode::Tui, TimerOptions::default()),
+        ] {
+            let mut config = quiet_config("10ms");
+            config.discord.enabled = true;
+            config.discord.application_id = "123456789012345678".to_string();
+            let started = Instant::now();
+            let report = run_timer(
+                &config,
+                &Arc::new(AtomicBool::new(false)),
+                &Arc::new(AtomicBool::new(false)),
+                &Arc::new(AtomicU64::new(0)),
+                mode,
+                options,
+                None,
+            )
+            .unwrap();
+            assert!(started.elapsed() < Duration::from_secs(10));
+            assert!(report.failures.is_empty());
+        }
     }
 
     fn visible_field_keys(config: &Config) -> Vec<FieldKey> {
