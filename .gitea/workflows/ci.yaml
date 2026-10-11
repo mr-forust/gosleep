@@ -16,9 +16,10 @@ concurrency:
 
 jobs:
   rust:
+    name: Rust tests and lint (workstation)
     runs-on: >-
       ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-          && github.ref == 'refs/heads/main' && 'homelab' || 'homelab-pr-container' }}
+          && github.ref == 'refs/heads/main' && 'workstation-build' || 'workstation-pr' }}
     timeout-minutes: 30
     steps:
       - name: Checkout repository
@@ -36,12 +37,12 @@ jobs:
           CI_TRUSTED_BUILD: >-
             ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
                 && github.ref == 'refs/heads/main' && '1' || '0' }}
-        run: bash .gitea/workflows/run-rust.sh full
+        run: bash .gitea/workflows/run-rust.sh verify
 
   lint-yaml:
     runs-on: >-
       ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-          && github.ref == 'refs/heads/main' && 'homelab' || 'homelab-pr-container' }}
+          && github.ref == 'refs/heads/main' && 'vps-light' || 'vps-pr' }}
     timeout-minutes: 10
     steps:
       - name: Checkout repository
@@ -60,3 +61,62 @@ jobs:
         run: |
           uv pip install --python "$CI_PYTHON_ENV/bin/python" yamllint==1.38.0
           yamllint -c .yamllint .
+
+  build:
+    needs: [rust, lint-yaml]
+    name: Release build (workstation)
+    runs-on: >-
+      ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+          && github.ref == 'refs/heads/main' && 'workstation-build' || 'workstation-pr' }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Check free disk
+        run: bash .gitea/workflows/ci-disk-check.sh 1536
+
+      - name: Check and build Rust
+        shell: bash
+        env:
+          CI_TRUSTED_BUILD: >-
+            ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+                && github.ref == 'refs/heads/main' && '1' || '0' }}
+        run: bash .gitea/workflows/run-rust.sh build
+
+      - name: Store checked binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gosleep-ci-${{ github.sha }}
+          path: target/release/gosleep-timer
+          if-no-files-found: error
+          retention-days: 7
+
+
+  summary:
+    name: CI summary
+    if: always()
+    needs: [rust, lint-yaml, build]
+    runs-on: vps-pr
+    timeout-minutes: 5
+    steps:
+      - name: Report every job result
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+
+          results = json.loads(os.environ['JOB_RESULTS'])
+          lines = ['## CI results', '', '| Job | Result |', '| --- | --- |']
+          for name, job in results.items():
+              lines.append(f"| {name} | {job['result']} |")
+          Path(os.environ['GITHUB_STEP_SUMMARY']).write_text('\n'.join(lines) + '\n')
+          if any(job['result'] not in ('success', 'skipped') for job in results.values()):
+              raise SystemExit(1)
+          PYTHON

@@ -28,10 +28,42 @@ Rollback: revert the CI commits and rerun validation. The generated GoSleep
 cache can remain; the old workflow does not use that path. Removing it is an
 optional, separately approved cleanup. Production services are unaffected.
 
-CI runs on main pushes, manual dispatches and `pull_request_target`. PR workflows
+Rust checks and release compilation are separate jobs, with compilation
+requiring successful Rust and YAML checks. CI runs on main pushes, manual dispatches and `pull_request_target`. PR workflows
 come from the base branch and checkout the exact PR head SHA with
 `persist-credentials: false` and read-only permissions. Non-main dispatches and
-PRs use `homelab-pr-container`; only main uses the trusted host runner.
+Rust checks and builds use `workstation-pr` for PRs and non-main dispatches,
+and `workstation-build` for trusted main. YAML stays on the VPS.
 Rust jobs allow 30 minutes and require 1,536 MiB free before starting. YAML
 jobs allow 10 minutes and require 512 MiB. Superseded PR and branch runs are
 cancelled; main and release runs are not cancelled by newer runs.
+
+## Shared runner policy
+
+| Work                                           | Runner label                           | Trust and resources                                                                           |
+| ---------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Lint, manifests, small Python tests, summaries | `vps-light` / `vps-pr`                 | Trusted host / disposable PR container; VPS PR limit: 1 CPU, 768 MiB, 512 processes           |
+| Compile, frontend build, container build       | `workstation-build` / `workstation-pr` | Trusted host / disposable PR container; workstation PR limit: 2 CPUs, 1536 MiB, 512 processes |
+
+Each queue has capacity one. Workstation host jobs have a systemd CPU quota of
+200%, MemoryMax 1536 MiB and lower scheduling priority. Docker children need
+separate limits; a host cgroup does not cap containers created by Docker.
+PR jobs have no host Docker socket, host cache mounts or publication secrets.
+Trusted jobs retain pinned tools and project caches. Lockfiles, image digests,
+explicit versions, disk preflights, timeouts and scoped cleanup remain required.
+A tool version change must be reviewed; do not switch to a floating latest tag.
+
+The CI graph separates checks and builds. `CI summary` reports every required
+job result and fails if any required job failed or was cancelled. Skipped image
+publication is expected for PRs. Credentials stay confined to publish steps;
+CI routing does not authorize deployment. If workstation is unavailable, heavy
+jobs wait there; do not silently fall back to the VPS or a trusted PR runner.
+
+Rollback: revert the routing commit. Keep the previous VPS labels as aliases
+while old workflows exist. No application data or volumes need to change.
+The authoritative runner configs and installation/rollback instructions live
+in homelab `.gitea/runner/`; per-project workflow files select the labels.
+
+Workstation CI uses the separate `gitea-ci-runner` account. Only the existing
+runner registration is copied; old SSH and Docker credentials are not imported.
+PR containers additionally drop all capabilities and enable no-new-privileges.

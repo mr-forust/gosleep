@@ -7,6 +7,11 @@ if [[ ! "$python_version" =~ ^3\.(12|13)$ ]]; then
   echo "Unsupported CI Python version: $python_version" >&2
   exit 2
 fi
+# Pin the patch version instead of resolving a moving Python minor.
+case "$python_version" in
+  3.12) python_version=3.12.14 ;;
+  3.13) python_version=3.13.15 ;;
+esac
 
 cache_root="${CI_TOOL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/gitea-ci}"
 bin_dir="$cache_root/bin"
@@ -29,7 +34,7 @@ if [[ ! -x "$uv_bin" || "$($uv_bin --version 2>/dev/null || true)" != "uv $uv_ve
   curl -fsSL --connect-timeout 15 --max-time 120 --retry 3 \
     "https://github.com/astral-sh/uv/releases/download/${uv_version}/${archive}" \
     -o "$tmp/uv.tar.gz"
-  tar -xzf "$tmp/uv.tar.gz" -C "$tmp" --strip-components=1 \
+  tar --no-same-owner -xzf "$tmp/uv.tar.gz" -C "$tmp" --strip-components=1 \
     "uv-${uv_arch}-unknown-linux-gnu/uv"
   install -m 0755 "$tmp/uv" "$uv_bin"
   rm -rf "$tmp"
