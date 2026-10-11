@@ -15,33 +15,18 @@ concurrency:
 
 jobs:
   verify:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, linux, arch, homelab]
     timeout-minutes: 30
-    container:
-      image: node:22.23.3-bookworm
-      options: --cpus=1 --memory=768m --pids-limit=512
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Check free disk
         run: bash .gitea/workflows/ci-disk-check.sh 1536
-
-      - name: Install Rust stable toolchain
-        shell: bash
-        run: bash .gitea/workflows/install-rust.sh
-
-      - name: Cache Cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: >-
-            cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml') }}
 
       - name: Check release tag and version files
         shell: bash
@@ -52,86 +37,51 @@ jobs:
           test -n "$package_version"
           test "$(cat VERSION)" = "$package_version"
           test "$tag" = "v${package_version}"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
 
-      - name: Check formatting
-        shell: bash
-        run: cargo fmt --check
-
-      - name: Run tests
-        shell: bash
-        run: cargo test --locked
-
-      - name: Check local clock transitions
-        shell: bash
-        run: |
-          TZ=Europe/Bratislava cargo test --locked \
-            local_deadlines_handle_daylight_saving_transitions -- --ignored
-
-      - name: Run clippy
-        shell: bash
-        run: cargo clippy --locked -- -D warnings
+      - name: Check Rust in the cached build environment
+        env:
+          CI_TRUSTED_BUILD: "1"
+        run: bash .gitea/workflows/run-rust.sh verify
 
   lint-yaml:
+    needs: verify
     runs-on: [self-hosted, linux, arch, homelab]
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
 
-      - name: Lint YAML in a temporary environment
-        shell: bash
+      - name: Prepare cached Python for YAML lint
+        run: bash .gitea/workflows/setup-python.sh 3.12
+      - name: Lint YAML
         run: |
-          set -euo pipefail
-          bash .gitea/workflows/ci-disk-check.sh 256
-          tools="$(mktemp -d "${RUNNER_TEMP:-/tmp}/gosleep-yaml.XXXXXXXX")"
-          trap 'rm -rf "$tools"' EXIT
-          python3 -m venv "$tools/venv"
-          "$tools/venv/bin/pip" install --disable-pip-version-check --no-cache-dir yamllint==1.38.0
-          "$tools/venv/bin/yamllint" -c .yamllint .
+          uv pip install --python "$CI_PYTHON_ENV/bin/python" yamllint==1.38.0
+          yamllint -c .yamllint .
 
   linux-amd64:
     needs: [verify, lint-yaml]
     runs-on: [self-hosted, linux, arch, homelab]
     timeout-minutes: 30
-    container:
-      image: node:22.23.3-bookworm
-      options: --cpus=1 --memory=768m --pids-limit=512
     permissions:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
 
       - name: Check free disk
         run: bash .gitea/workflows/ci-disk-check.sh 1536
 
-      - name: Install release tools
-        shell: bash
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends curl jq
-
-      - name: Install Rust stable toolchain
-        shell: bash
-        run: bash .gitea/workflows/install-rust.sh
-
-      - name: Cache Cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: >-
-            cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml') }}
-
-      - name: Build release binary
-        shell: bash
-        run: cargo build --release --locked
+      - name: Install cached release tools
+        run: bash .gitea/workflows/install-jq.sh
+      - name: Build release binary in the cached build environment
+        env:
+          CI_TRUSTED_BUILD: "1"
+        run: bash .gitea/workflows/run-rust.sh build
 
       - name: Package artifact
         shell: bash
@@ -207,7 +157,7 @@ jobs:
           done
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: gosleep-timer-linux-amd64
           path: dist/*
