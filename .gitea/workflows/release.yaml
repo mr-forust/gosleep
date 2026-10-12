@@ -39,6 +39,9 @@ jobs:
           test "$tag" = "v${package_version}"
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
 
+      - name: Validate CI configuration offline
+        run: bash .gitea/workflows/validate-ci-config.sh
+
       - name: Check Rust in the cached build environment
         env:
           CI_TRUSTED_BUILD: "1"
@@ -161,3 +164,4 @@ jobs:
         with:
           name: gosleep-timer-linux-amd64
           path: dist/*
+          retention-days: 7
