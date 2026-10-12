@@ -1,6 +1,6 @@
 [package]
 name = "gosleep-timer"
-version = "1.4.1"
+version = "1.5.0"
 authors = ["forust"]
 edition = "2024"
 rust-version = "1.88"
