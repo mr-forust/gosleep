@@ -116,7 +116,9 @@ jobs:
     name: CI summary
     if: always()
     needs: [workflow-shell, rust, lint-yaml, build]
-    runs-on: vps-pr
+    runs-on: >-
+      ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+          && github.ref == 'refs/heads/main' && 'vps-light' || 'vps-pr' }}
     timeout-minutes: 5
     steps:
       - name: Report every job result
