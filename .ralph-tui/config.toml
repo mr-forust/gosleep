@@ -1,0 +1,61 @@
+maxIterations = 10
+iterationDelay = 1000
+outputDir = ".ralph-tui/iterations"
+autoCommit = true
+agent = "opencode"
+tracker = "json"
+subagentTracingDetail = "minimal"
+progressFile = ".ralph-tui/progress.md"
+configVersion = "2.1"
+
+[[agents]]
+name = "spark"
+plugin = "opencode"
+
+[agents.options]
+model = "opencode/muse-spark-1.3-contributor-free"
+agent = "build"
+
+[[agents]]
+name = "mimo"
+plugin = "opencode"
+
+[agents.options]
+model = "opencode/mimo-v2.6-flash-free"
+agent = "build"
+
+[[agents]]
+name = "bunny"
+plugin = "opencode"
+
+[agents.options]
+model = "opencode/space-bunny-free"
+agent = "build"
+
+[[agents]]
+name = "longcat"
+plugin = "opencode"
+default = true
+
+[agents.options]
+model = "opencode/longcat-2.5-preview-free"
+agent = "build"
+
+[errorHandling]
+strategy = "retry"
+maxRetries = 3
+retryDelayMs = 5000
+continueOnNonZeroExit = false
+
+[rateLimitHandling]
+enabled = true
+maxRetries = 3
+baseBackoffMs = 5000
+recoverPrimaryBetweenIterations = true
+
+[notifications]
+enabled = false
+sound = "off"
+
+[agentOptions]
+[trackerOptions]

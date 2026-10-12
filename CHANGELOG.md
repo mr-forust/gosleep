@@ -6,6 +6,13 @@ The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-12
+
+### Added
+
+- Add optional Discord Rich Presence for countdown, paused, and post-countdown sleep states in CLI and TUI runs.
+- Configure Discord with a local Application ID; unavailable Discord clients do not interrupt timer runs.
+
 ## [1.4.1] - 2026-10-08
 
 ### Fixed

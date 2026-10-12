@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "sessionId": "4117981a-c4d7-4e08-a110-df92570e5385",
+  "status": "running",
+  "startedAt": "2026-10-11T15:10:44.673Z",
+  "updatedAt": "2026-10-11T15:18:25.067Z",
+  "currentIteration": 3,
+  "maxIterations": 10,
+  "tasksCompleted": 3,
+  "isPaused": false,
+  "agentPlugin": "opencode",
+  "trackerState": {
+    "plugin": "json",
+    "executionScopes": [],
+    "totalTasks": 0,
+    "tasks": []
+  },
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "US-001",
+      "taskTitle": "Configure Discord Rich Presence",
+      "taskCompleted": true,
+      "durationMs": 115479,
+      "startedAt": "2026-10-11T15:10:49.186Z",
+      "endedAt": "2026-10-11T15:12:44.665Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "US-002",
+      "taskTitle": "Add a non-blocking Discord presence client",
+      "taskCompleted": true,
+      "durationMs": 180884,
+      "startedAt": "2026-10-11T15:12:45.688Z",
+      "endedAt": "2026-10-11T15:15:46.572Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "US-003",
+      "taskTitle": "Publish countdown status in CLI and TUI",
+      "taskCompleted": true,
+      "durationMs": 156226,
+      "startedAt": "2026-10-11T15:15:47.593Z",
+      "endedAt": "2026-10-11T15:18:23.819Z"
+    }
+  ],
+  "skippedTaskIds": [],
+  "cwd": "/home/forust/gosleep-timer",
+  "activeTaskIds": [
+    "US-004"
+  ],
+  "subagentPanelVisible": false
+}

@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "gosleep-timer"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -588,6 +588,7 @@ dependencies = [
  "noyalib",
  "ratatui",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1380,6 +1381,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_json"
+version = "1.0.153"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa62079d232416ecf7b2f938d389e28bbcd3677bcdb67b42e2f29c2433552176"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1938,3 +1952,9 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
