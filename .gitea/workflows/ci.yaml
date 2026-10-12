@@ -17,7 +17,9 @@ concurrency:
 jobs:
   workflow-shell:
     name: Workflow, shell, and Compose
-    runs-on: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && 'vps-light' || 'vps-pr' }}
+    runs-on: >-
+      ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+          && github.ref == 'refs/heads/main' && 'vps-light' || 'vps-pr' }}
     timeout-minutes: 15
     permissions:
       contents: read
