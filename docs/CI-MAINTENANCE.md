@@ -19,3 +19,14 @@ Run CI on a pull request before merging. Main CI validates the merged commit.
 Revert the focused CI commit to restore previous configuration. Reverting source
 files does not restore runner configuration; use the Homelab runner backup procedure.
 Do not prune shared Docker images or volumes to fix a failed job.
+
+## Required main checks
+
+Main requires `ci / CI summary (pull_request_target)` on each PR. The summary requires all validation
+jobs to succeed and allows only documented conditional image skips. Force push
+to main is disabled. The owner's existing direct-push path and administrator
+overrides remain available; normal changes should use checked PRs.
+
+Runner post-task maintenance clears supported npm/uv download caches above
+256 MiB each under the installer lock. Installed tools, runtimes, Rust caches,
+Docker images and application data are outside that cleanup.
