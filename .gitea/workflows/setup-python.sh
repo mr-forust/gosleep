@@ -31,9 +31,8 @@ if [[ ! -x "$uv_bin" || "$($uv_bin --version 2>/dev/null || true)" != "uv $uv_ve
   tmp="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/gosleep-uv.XXXXXXXX")"
   trap 'rm -rf "$tmp"' EXIT
   archive="uv-${uv_arch}-unknown-linux-gnu.tar.gz"
-  curl -fsSL --connect-timeout 15 --max-time 120 --retry 3 \
-    "https://github.com/astral-sh/uv/releases/download/${uv_version}/${archive}" \
-    -o "$tmp/uv.tar.gz"
+  bash "$(dirname "${BASH_SOURCE[0]}")/download-verified.sh" \
+    "https://github.com/astral-sh/uv/releases/download/${uv_version}/${archive}" "$tmp/uv.tar.gz"
   tar --no-same-owner -xzf "$tmp/uv.tar.gz" -C "$tmp" --strip-components=1 \
     "uv-${uv_arch}-unknown-linux-gnu/uv"
   install -m 0755 "$tmp/uv" "$uv_bin"

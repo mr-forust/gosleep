@@ -15,6 +15,21 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request_target' || github.ref != 'refs/heads/main' }}
 
 jobs:
+  workflow-shell:
+    name: Workflow, shell, and Compose
+    runs-on: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && 'vps-light' || 'vps-pr' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact source without credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Validate CI configuration offline
+        run: bash .gitea/workflows/validate-ci-config.sh
+
   rust:
     name: Rust tests and lint (workstation)
     runs-on: >-
@@ -63,7 +78,7 @@ jobs:
           yamllint -c .yamllint .
 
   build:
-    needs: [rust, lint-yaml]
+    needs: [workflow-shell, rust, lint-yaml]
     name: Release build (workstation)
     runs-on: >-
       ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -95,17 +110,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-
   summary:
     name: CI summary
     if: always()
-    needs: [rust, lint-yaml, build]
+    needs: [workflow-shell, rust, lint-yaml, build]
     runs-on: vps-pr
     timeout-minutes: 5
     steps:
       - name: Report every job result
         env:
           JOB_RESULTS: ${{ toJSON(needs) }}
+          CI_EVENT: ${{ github.event_name }}
         run: |
           python3 - <<'PYTHON'
           import json
@@ -117,6 +132,8 @@ jobs:
           for name, job in results.items():
               lines.append(f"| {name} | {job['result']} |")
           Path(os.environ['GITHUB_STEP_SUMMARY']).write_text('\n'.join(lines) + '\n')
-          if any(job['result'] not in ('success', 'skipped') for job in results.values()):
+          allowed_skips = [] if os.environ['CI_EVENT'] == 'pull_request_target' else []
+          if any(job['result'] != 'success' and not (name in allowed_skips and job['result'] == 'skipped')
+                 for name, job in results.items()):
               raise SystemExit(1)
           PYTHON

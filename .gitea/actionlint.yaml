@@ -1,0 +1,11 @@
+self-hosted-runner:
+  labels:
+    [
+      homelab,
+      homelab-pr,
+      homelab-pr-container,
+      vps-light,
+      vps-pr,
+      workstation-build,
+      workstation-pr,
+    ]
