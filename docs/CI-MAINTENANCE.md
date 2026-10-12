@@ -30,3 +30,6 @@ overrides remain available; normal changes should use checked PRs.
 Runner post-task maintenance clears supported npm/uv download caches above
 256 MiB each under the installer lock. Installed tools, runtimes, Rust caches,
 Docker images and application data are outside that cleanup.
+
+Release workflows report every job result in a final summary and retain uploaded
+artifacts for seven days. Main CI does not publish a versioned release.

@@ -165,3 +165,29 @@ jobs:
           name: gosleep-timer-linux-amd64
           path: dist/*
           retention-days: 7
+
+  summary:
+    name: Release summary
+    if: always()
+    needs: [verify, lint-yaml, linux-amd64]
+    runs-on: vps-pr
+    timeout-minutes: 5
+    steps:
+      - name: Report release job results
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+          results = json.loads(os.environ['JOB_RESULTS'])
+          lines = ['## Release results', '', '| Job | Result |', '| --- | --- |']
+          for name, job in results.items():
+              lines.append(f"| {name} | {job['result']} |")
+          Path(os.environ['GITHUB_STEP_SUMMARY']).write_text('\n'.join(lines) + '\n')
+          allowed_skips = []
+          if any(job['result'] != 'success' and not (name in allowed_skips and job['result'] == 'skipped')
+                 for name, job in results.items()):
+              raise SystemExit(1)
+          PYTHON
