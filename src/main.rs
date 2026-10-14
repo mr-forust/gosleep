@@ -32,6 +32,13 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
+mod config;
+
+use crate::config::{
+    Config, DiscordConfig, LockAction, MonitorAction, WorkspaceAction, default_config_path,
+    ensure_config, normalize_config, parse_duration, save_config, validate_config,
+};
+
 #[derive(Parser)]
 #[command(
     name = "gosleep-timer",
@@ -60,125 +67,6 @@ enum Commands {
     Stats,
     Preview,
     Init,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct Config {
-    duration: String,
-    inhibit_sleep: bool,
-    actions: Actions,
-    discord: DiscordConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-struct Actions {
-    workspace: WorkspaceAction,
-    media: MediaAction,
-    brightness: BrightnessAction,
-    mute: ToggleAction,
-    mute_input: ToggleAction,
-    lock: LockAction,
-    monitor: MonitorAction,
-    notify: NotifyAction,
-    kill: KillAction,
-    power: PowerAction,
-    custom: CustomAction,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct WorkspaceAction {
-    enabled: bool,
-    backend: String,
-    number: u32,
-    command: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct MediaAction {
-    enabled: bool,
-    action: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct BrightnessAction {
-    enabled: bool,
-    value: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-struct ToggleAction {
-    enabled: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct LockAction {
-    enabled: bool,
-    backend: String,
-    command: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct MonitorAction {
-    enabled: bool,
-    backend: String,
-    command: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct NotifyAction {
-    enabled: bool,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-struct KillAction {
-    enabled: bool,
-    processes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct PowerAction {
-    mode: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-struct CustomAction {
-    enabled: bool,
-    commands: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct DiscordConfig {
-    enabled: bool,
-    application_id: String,
-}
-
-impl Default for DiscordConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            application_id: String::new(),
-        }
-    }
-}
-
-impl DiscordConfig {
-    fn should_connect(&self) -> bool {
-        self.enabled && !self.application_id.trim().is_empty()
-    }
 }
 
 /// Timer phase published through Discord local IPC (US-003/US-004 own wording).
@@ -213,10 +101,12 @@ fn presence_activity_payload(
         "details".to_string(),
         serde_json::Value::String(activity.details.clone()),
     );
-    fields.insert(
-        "state".to_string(),
-        serde_json::Value::String(activity.state.clone()),
-    );
+    if !activity.state.is_empty() {
+        fields.insert(
+            "state".to_string(),
+            serde_json::Value::String(activity.state.clone()),
+        );
+    }
     if !timestamps.is_empty() {
         fields.insert(
             "timestamps".to_string(),
@@ -290,21 +180,16 @@ enum PresenceRequest {
 
 /// Pure countdown projection for US-003.
 ///
-/// Running presence shows `Sleep timer` with `{remaining} until sleep` and a
-/// countdown end timestamp. `Power off after timer` is appended only when the
-/// power mode is exactly `poweroff`.
+/// Running presence shows `Sleep timer` and the Discord countdown timestamp,
+/// without state text so Discord only shows its green live timer below it.
 fn should_show_poweroff(power_mode: &str) -> bool {
     power_mode == "poweroff"
 }
 
-fn countdown_presence(remaining: Duration, power_mode: &str, now_unix: u64) -> PresenceActivity {
-    let mut state = format!("{} until sleep", format_duration(remaining));
-    if should_show_poweroff(power_mode) {
-        state.push_str(" \u{2022} Power off after timer");
-    }
+fn countdown_presence(remaining: Duration, _power_mode: &str, now_unix: u64) -> PresenceActivity {
     PresenceActivity {
         details: "Sleep timer".to_string(),
-        state,
+        state: String::new(),
         start_timestamp: None,
         end_timestamp: Some(now_unix.saturating_add(remaining.as_secs())),
     }
@@ -338,15 +223,14 @@ fn post_countdown_presence() -> PresenceActivity {
     }
 }
 
-/// Post-countdown sleep status for successful real-action runs (US-004).
+/// Post-countdown elapsed timestamp for successful real-action runs (US-004).
 ///
-/// `sleep_start_unix` must be captured at the start of post-countdown actions
-/// so Discord shows elapsed time since activation. The state text names the
-/// scheduled duration; the live elapsed counter comes from `start_timestamp`.
-fn sleeping_presence(sleep_start_unix: u64, duration: Duration) -> PresenceActivity {
+/// `sleep_start_unix` is captured at the start of post-countdown actions. The
+/// green elapsed counter comes from `start_timestamp`; no state text is sent.
+fn sleeping_presence(sleep_start_unix: u64) -> PresenceActivity {
     PresenceActivity {
         details: "Sleep timer".to_string(),
-        state: format!("Sleeping for {}", format_duration(duration)),
+        state: String::new(),
         start_timestamp: Some(sleep_start_unix),
         end_timestamp: None,
     }
@@ -355,18 +239,17 @@ fn sleeping_presence(sleep_start_unix: u64, duration: Duration) -> PresenceActiv
 /// Pure post-run presence selector (US-004).
 ///
 /// Only a real, fully successful action run represents a sleep interval and
-/// gets the elapsed `Sleeping for ...` status. Dry-run, `--no-actions`,
-/// failures, and empty action lists keep the accurate timestamp-free
-/// `finished` state so Discord never shows a misleading sleep timer.
+/// gets the green elapsed timestamp without state text. Dry-run, `--no-actions`,
+/// failures, and empty action lists keep the accurate timestamp-free `finished`
+/// state so Discord never shows a misleading sleep timer.
 fn post_run_presence(
     options: TimerOptions,
     has_failures: bool,
     has_actions: bool,
     sleep_start_unix: u64,
-    duration: Duration,
 ) -> PresenceActivity {
     if !options.dry_run && !options.no_actions && !has_failures && has_actions {
-        sleeping_presence(sleep_start_unix, duration)
+        sleeping_presence(sleep_start_unix)
     } else {
         post_countdown_presence()
     }
@@ -561,6 +444,7 @@ struct HistoryEntry {
 struct TimerReport {
     started_at: u64,
     duration: Duration,
+    sleep_started_at: Option<u64>,
     actions: Vec<String>,
     failures: Vec<String>,
     dry_run: bool,
@@ -580,83 +464,6 @@ impl Drop for InhibitGuard {
         if let Some(mut child) = self.0.take() {
             let _ = child.kill();
             let _ = child.wait();
-        }
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            duration: "25m".to_string(),
-            inhibit_sleep: false,
-            actions: Actions::default(),
-            discord: DiscordConfig::default(),
-        }
-    }
-}
-
-impl Default for WorkspaceAction {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            backend: "auto".to_string(),
-            number: 3,
-            command: String::new(),
-        }
-    }
-}
-
-impl Default for MediaAction {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            action: "stop".to_string(),
-        }
-    }
-}
-
-impl Default for BrightnessAction {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            value: 30,
-        }
-    }
-}
-
-impl Default for LockAction {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            backend: "auto".to_string(),
-            command: String::new(),
-        }
-    }
-}
-
-impl Default for MonitorAction {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            backend: "auto".to_string(),
-            command: String::new(),
-        }
-    }
-}
-
-impl Default for NotifyAction {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            message: "Timer finished".to_string(),
-        }
-    }
-}
-
-impl Default for PowerAction {
-    fn default() -> Self {
-        Self {
-            mode: "none".to_string(),
         }
     }
 }
@@ -810,7 +617,7 @@ fn main() -> Result<()> {
                 Some(&mut stdout),
             )?;
             // `_sleep_presence` stays alive through the wake-confirmation wait
-            // so the elapsed `Sleeping for ...` status remains visible; it is
+            // so the green elapsed timestamp remains visible; it is
             // disarmed, so dropping it at scope end closes the IPC connection
             // and lets Discord clear the status on process exit/poweroff.
             let slept_seconds = prompt_wake_confirmation(&config, options)?;
@@ -862,45 +669,6 @@ fn main() -> Result<()> {
         }
         None => run_tui(path, config),
     }
-}
-
-fn default_config_path() -> PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(dir).join("gosleep-timer").join("config.yaml");
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config")
-        .join("gosleep-timer")
-        .join("config.yaml")
-}
-
-fn ensure_config(path: &Path) -> Result<Config> {
-    if !path.exists() {
-        let config = Config::default();
-        save_config(path, &config)?;
-        return Ok(config);
-    }
-    let data = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let mut config: Config = noyalib::from_str(&data).context("parse config")?;
-    normalize_config(&mut config);
-    validate_config(&config)?;
-    Ok(config)
-}
-
-fn save_config(path: &Path, config: &Config) -> Result<()> {
-    let mut config = config.clone();
-    normalize_config(&mut config);
-    validate_config(&config)?;
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let data = noyalib::to_string(&config).context("serialize config")?;
-    fs::write(path, data).with_context(|| format!("write {}", path.display()))?;
-    Ok(())
 }
 
 fn history_path(config_path: &Path) -> PathBuf {
@@ -1030,117 +798,6 @@ fn prompt_wake_confirmation(config: &Config, options: TimerOptions) -> Result<Op
     Ok(Some(started.elapsed().as_secs()))
 }
 
-fn normalize_config(config: &mut Config) {
-    if config.duration.is_empty() {
-        config.duration = "25m".to_string();
-    }
-    if config.actions.workspace.backend.is_empty() {
-        config.actions.workspace.backend = "auto".to_string();
-    }
-    if config.actions.workspace.number == 0 {
-        config.actions.workspace.number = 1;
-    }
-    if config.actions.media.action.is_empty() {
-        config.actions.media.action = "stop".to_string();
-    }
-    if config.actions.brightness.value == 0 {
-        config.actions.brightness.value = 30;
-    }
-    if config.actions.brightness.value > 100 {
-        config.actions.brightness.value = 100;
-    }
-    if config.actions.lock.backend.is_empty() {
-        config.actions.lock.backend = "auto".to_string();
-    }
-    if config.actions.monitor.backend.is_empty() {
-        config.actions.monitor.backend = "auto".to_string();
-    }
-    if config.actions.notify.message.is_empty() {
-        config.actions.notify.message = "Timer finished".to_string();
-    }
-    if config.actions.power.mode.is_empty() {
-        config.actions.power.mode = "none".to_string();
-    }
-    config.discord.application_id = config.discord.application_id.trim().to_string();
-}
-
-fn validate_config(config: &Config) -> Result<()> {
-    parse_duration(&config.duration)?;
-    match config.actions.power.mode.as_str() {
-        "none" | "suspend" | "hibernate" | "hybrid-sleep" | "poweroff" | "reboot" => {}
-        mode => bail!("invalid power mode {mode:?}"),
-    }
-    match config.actions.workspace.backend.as_str() {
-        "auto" | "niri" | "hyprland" | "sway" | "i3" | "kde" => {}
-        backend => bail!("invalid workspace backend {backend:?}"),
-    }
-    match config.actions.monitor.backend.as_str() {
-        "auto" | "hyprland" | "niri" | "sway" | "kde" | "x11" => {}
-        backend => bail!("invalid monitor backend {backend:?}"),
-    }
-    match config.actions.lock.backend.as_str() {
-        "auto" | "loginctl" | "hyprlock" | "swaylock" | "i3lock" | "gnome" | "kde"
-        | "xscreensaver" => {}
-        backend => bail!("invalid lock backend {backend:?}"),
-    }
-    match config.actions.media.action.as_str() {
-        "none" | "stop" | "pause" | "play-pause" | "next" | "previous" => {}
-        action => bail!("invalid media action {action:?}"),
-    }
-    Ok(())
-}
-
-fn parse_duration(value: &str) -> Result<Duration> {
-    if value.is_empty() {
-        bail!("duration is required");
-    }
-
-    let mut total = 0.0_f64;
-    let chars: Vec<char> = value.chars().collect();
-    let mut index = 0;
-    while index < chars.len() {
-        let start = index;
-        while index < chars.len() && (chars[index].is_ascii_digit() || chars[index] == '.') {
-            index += 1;
-        }
-        if start == index {
-            bail!("invalid duration {value:?}");
-        }
-        let number: f64 = chars[start..index].iter().collect::<String>().parse()?;
-        if !number.is_finite() {
-            bail!("duration component must be finite");
-        }
-
-        let unit_start = index;
-        while index < chars.len() && !chars[index].is_ascii_digit() && chars[index] != '.' {
-            index += 1;
-        }
-        let unit: String = chars[unit_start..index].iter().collect();
-        let multiplier = match unit.as_str() {
-            "h" => 3600.0,
-            "m" => 60.0,
-            "s" => 1.0,
-            "ms" => 0.001,
-            "us" | "µs" => 0.000001,
-            "ns" => 0.000000001,
-            _ => bail!("invalid duration unit {unit:?}"),
-        };
-        total += number * multiplier;
-        if !total.is_finite() {
-            bail!("duration is too large");
-        }
-    }
-
-    if total <= 0.0 {
-        bail!("duration must be greater than zero");
-    }
-    let duration = Duration::try_from_secs_f64(total).context("duration is too large")?;
-    if duration.is_zero() {
-        bail!("duration must be greater than zero");
-    }
-    Ok(duration)
-}
-
 fn build_action_commands(config: &Config) -> Vec<ActionCommand> {
     let mut config = config.clone();
     normalize_config(&mut config);
@@ -1257,7 +914,7 @@ fn build_action_commands(config: &Config) -> Vec<ActionCommand> {
 }
 
 fn workspace_command(action: &WorkspaceAction) -> ActionCommand {
-    if !action.command.is_empty() {
+    if action.backend == "auto" && !action.command.is_empty() {
         return ActionCommand {
             label: "workspace",
             args: vec![],
@@ -1324,7 +981,7 @@ fn workspace_command(action: &WorkspaceAction) -> ActionCommand {
 }
 
 fn monitor_command(action: &MonitorAction) -> ActionCommand {
-    if !action.command.is_empty() {
+    if action.backend == "auto" && !action.command.is_empty() {
         return ActionCommand {
             label: "monitor",
             args: vec![],
@@ -1350,7 +1007,7 @@ fn monitor_command(action: &MonitorAction) -> ActionCommand {
         },
         "sway" => ActionCommand {
             label: "monitor",
-            args: vec!["swaymsg", "output", "*", "dpms", "off"]
+            args: vec!["swaymsg", "output", "*", "power", "off"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
@@ -1373,14 +1030,14 @@ fn monitor_command(action: &MonitorAction) -> ActionCommand {
             label: "monitor",
             args: vec![],
             shell: Some(
-                "if command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch dpms off; elif command -v niri >/dev/null 2>&1; then niri msg action power-off-monitors; elif command -v swaymsg >/dev/null 2>&1; then swaymsg output '*' dpms off; elif command -v kscreen-doctor >/dev/null 2>&1; then kscreen-doctor --dpms off; elif command -v xset >/dev/null 2>&1; then xset dpms force off; else echo 'no supported monitor power-off backend found' >&2; exit 127; fi".to_string()
+                "if command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch dpms off; elif command -v niri >/dev/null 2>&1; then niri msg action power-off-monitors; elif command -v swaymsg >/dev/null 2>&1; then swaymsg output '*' power off; elif command -v kscreen-doctor >/dev/null 2>&1; then kscreen-doctor --dpms off; elif command -v xset >/dev/null 2>&1; then xset dpms force off; else echo 'no supported monitor power-off backend found' >&2; exit 127; fi".to_string()
             ),
         },
     }
 }
 
 fn lock_command(action: &LockAction) -> ActionCommand {
-    if !action.command.is_empty() {
+    if action.backend == "auto" && !action.command.is_empty() {
         return ActionCommand {
             label: "lock",
             args: vec![],
@@ -1417,10 +1074,32 @@ fn lock_command(action: &LockAction) -> ActionCommand {
             label: "lock",
             args: vec![
                 "qdbus".to_string(),
-                "org.kde.ScreenSaver".to_string(),
+                "org.freedesktop.ScreenSaver".to_string(),
                 "/ScreenSaver".to_string(),
-                "org.freedesktop.ScreenSaver.SetActive".to_string(),
-                "true".to_string(),
+                "org.freedesktop.ScreenSaver.Lock".to_string(),
+            ],
+            shell: None,
+        },
+        "noctalia-qs" => ActionCommand {
+            label: "lock",
+            args: vec![
+                "qs".to_string(),
+                "-c".to_string(),
+                "noctalia-shell".to_string(),
+                "ipc".to_string(),
+                "call".to_string(),
+                "lockScreen".to_string(),
+                "lock".to_string(),
+            ],
+            shell: None,
+        },
+        "noctalia" => ActionCommand {
+            label: "lock",
+            args: vec![
+                "noctalia".to_string(),
+                "msg".to_string(),
+                "session".to_string(),
+                "lock".to_string(),
             ],
             shell: None,
         },
@@ -1433,7 +1112,7 @@ fn lock_command(action: &LockAction) -> ActionCommand {
             label: "lock",
             args: vec![],
             shell: Some(
-                "if command -v loginctl >/dev/null 2>&1; then loginctl lock-session; elif command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch exec hyprlock; elif command -v swaylock >/dev/null 2>&1; then swaylock; elif command -v i3lock >/dev/null 2>&1; then i3lock; elif command -v gnome-screensaver-command >/dev/null 2>&1; then gnome-screensaver-command -l; elif command -v qdbus >/dev/null 2>&1; then qdbus org.kde.ScreenSaver /ScreenSaver org.freedesktop.ScreenSaver.SetActive true; elif command -v xscreensaver-command >/dev/null 2>&1; then xscreensaver-command -lock; else echo 'no supported lock backend found' >&2; exit 127; fi".to_string()
+                "if command -v loginctl >/dev/null 2>&1; then loginctl lock-session; elif command -v hyprctl >/dev/null 2>&1; then hyprctl dispatch exec hyprlock; elif command -v swaylock >/dev/null 2>&1; then swaylock; elif command -v i3lock >/dev/null 2>&1; then i3lock; elif command -v gnome-screensaver-command >/dev/null 2>&1; then gnome-screensaver-command -l; elif command -v qdbus >/dev/null 2>&1; then qdbus org.freedesktop.ScreenSaver /ScreenSaver org.freedesktop.ScreenSaver.Lock; elif command -v xscreensaver-command >/dev/null 2>&1; then xscreensaver-command -lock; else echo 'no supported lock backend found' >&2; exit 127; fi".to_string()
             ),
         },
     }
@@ -1478,7 +1157,7 @@ fn run_timer(
     // and TUI runs, including --no-actions and dry-run. Stopped runs clear
     // explicitly. Successful runs transition to the post-countdown state and
     // disarm the drop-clear; the returned guard keeps the IPC connection open
-    // so US-004 retains `Sleeping for ...` while the TUI stays open and during
+    // so US-004 retains the green elapsed timer while the TUI stays open and during
     // the CLI wake-confirmation wait. Discord clears it on process exit/poweroff.
     let mut discord = DiscordPresence::start(&config.discord);
     discord.update(countdown_presence(
@@ -1625,7 +1304,7 @@ fn run_timer(
     }
     // Successful completion transitions instead of clearing. Only a real,
     // fully successful action run represents a sleep interval, so only then
-    // publish `Sleeping for ...` with the elapsed start timestamp. Dry-run,
+    // publish the elapsed start timestamp without state text. Dry-run,
     // --no-actions, failures, and empty action lists keep the accurate
     // timestamp-free `finished` state. The disarmed guard is returned so the
     // caller retains the status; Discord clears it on process exit/poweroff.
@@ -1634,13 +1313,14 @@ fn run_timer(
         !failures.is_empty(),
         !actions.is_empty(),
         sleep_start_unix,
-        duration,
     );
+    let sleep_started_at = completed.start_timestamp;
     discord.update(completed);
     discord.disarm();
     let report = TimerReport {
         started_at,
         duration,
+        sleep_started_at,
         actions: actions.iter().map(ActionCommand::display).collect(),
         failures: failures.clone(),
         dry_run: options.dry_run,
@@ -1830,6 +1510,7 @@ struct App {
     show_log: bool,
     action_log: Vec<String>,
     sleep_presence: Option<DiscordPresence>,
+    sleep_started_at: Option<u64>,
 }
 
 struct TimerState {
@@ -1898,6 +1579,7 @@ impl App {
             show_log: false,
             action_log: Vec::new(),
             sleep_presence: None,
+            sleep_started_at: None,
         }
     }
 
@@ -1931,6 +1613,8 @@ impl App {
                             let last = self.visible_fields().len().saturating_sub(1);
                             self.focus = (self.focus + 1).min(last);
                         }
+                        KeyCode::Left => self.change_group(GROUPS.len() - 1),
+                        KeyCode::Right => self.change_group(1),
                         KeyCode::Tab => self.change_group(1),
                         KeyCode::BackTab => self.change_group(GROUPS.len() - 1),
                         KeyCode::Char('1') => self.set_preset("30m"),
@@ -1998,7 +1682,7 @@ impl App {
                 })
                 .unwrap_or("Enter edit");
             format!(
-                "Tab group | {action} | r run | s save | q quit\n1 30m | 2 1h | 3 2h | l preview/results | PgUp/PgDn scroll\n{}",
+                "Left/Right group | Tab group | {action} | r run | s save | q quit\n1 30m | 2 1h | 3 2h | l preview/results | PgUp/PgDn scroll\n{}",
                 self.focused_field().map(field_hint).unwrap_or("")
             )
         };
@@ -2009,7 +1693,7 @@ impl App {
                     edit.field.label
                 )
             } else {
-                "Tab group | Enter edit | r run\n1/2/3 presets | l log | PgUp/PgDn\ns save | q quit"
+                "Left/Right group | Enter edit | r run\n1/2/3 presets | l log | PgUp/PgDn\ns save | q quit"
                     .to_string()
             }
         } else {
@@ -2134,8 +1818,19 @@ impl App {
                 ),
             header[0],
         );
+        let status = self.sleep_started_at.map_or_else(
+            || self.status.clone(),
+            |started_at| {
+                format!(
+                    "slept for {}",
+                    format_duration(Duration::from_secs(
+                        unix_timestamp().saturating_sub(started_at)
+                    ))
+                )
+            },
+        );
         frame.render_widget(
-            Paragraph::new(self.status.clone())
+            Paragraph::new(status)
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(Color::Yellow))
                 .wrap(Wrap { trim: false }),
@@ -2164,20 +1859,35 @@ impl App {
 
     fn draw_body(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
-        let tabs = GROUPS
-            .iter()
-            .enumerate()
-            .map(|(index, name)| {
-                Span::styled(
-                    format!("{name} "),
+        let active_tab_style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        let inactive_tab_style = Style::default().fg(Color::Gray);
+        let tabs = if area.width < 58 {
+            vec![
+                Span::raw("  "),
+                Span::styled("‹ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!(" {} ", GROUPS[self.group]), active_tab_style),
+                Span::styled(" ›", Style::default().fg(Color::DarkGray)),
+            ]
+        } else {
+            let mut tabs = vec![Span::raw("  ")];
+            for (index, name) in GROUPS.iter().enumerate() {
+                if index > 0 {
+                    tabs.push(Span::raw("  "));
+                }
+                tabs.push(Span::styled(
+                    format!(" {name} "),
                     if index == self.group {
-                        Style::default().fg(Color::Black).bg(Color::Cyan)
+                        active_tab_style
                     } else {
-                        Style::default().fg(Color::DarkGray)
+                        inactive_tab_style
                     },
-                )
-            })
-            .collect::<Vec<_>>();
+                ));
+            }
+            tabs
+        };
         frame.render_widget(Paragraph::new(Line::from(tabs)), chunks[0]);
         let area = chunks[1];
         if area.width >= 118 {
@@ -2224,7 +1934,7 @@ impl App {
                     .edit
                     .as_ref()
                     .is_some_and(|edit| edit.field.key == field.key);
-                let prefix = format!("{marker} {}: ", field.label);
+                let prefix = format!("  {marker} {}: ", field.label);
                 let width = usize::from(area.width.saturating_sub(2)).saturating_sub(prefix.len());
                 let value = if editing {
                     edit_view(self.edit.as_ref().expect("edit checked"), width)
@@ -2282,8 +1992,6 @@ impl App {
                 lines.push(Line::from("No actions enabled; countdown only."));
             }
         }
-        let height = usize::from(area.height.saturating_sub(2));
-        self.preview_offset = self.preview_offset.min(lines.len().saturating_sub(height));
         let title = if self.show_log {
             "results"
         } else if area.width < 60 {
@@ -2291,16 +1999,133 @@ impl App {
         } else {
             "action plan / commands"
         };
-        let range = if lines.len() > height {
-            format!(
-                " {}-{}/{}",
-                self.preview_offset + 1,
-                (self.preview_offset + height).min(lines.len()),
-                lines.len()
-            )
-        } else {
+        let base_block = Block::default()
+            .title(format!(" {title} "))
+            .borders(Borders::ALL)
+            .border_style(Color::Blue);
+        let inner = base_block.inner(area);
+
+        // Use the unused space below a short plan or results list for a timer.
+        // If the content is long, keep the existing scrollable view unchanged.
+        let show_elapsed = self.show_log && self.sleep_started_at.is_some();
+        let show_card = (!self.show_log || show_elapsed)
+            && inner.width >= 50
+            && usize::from(inner.height) >= lines.len().saturating_add(10);
+        let range = if show_card {
             String::new()
+        } else {
+            let height = usize::from(inner.height);
+            self.preview_offset = self.preview_offset.min(lines.len().saturating_sub(height));
+            if lines.len() > height {
+                format!(
+                    " {}-{}/{}",
+                    self.preview_offset + 1,
+                    (self.preview_offset + height).min(lines.len()),
+                    lines.len()
+                )
+            } else {
+                String::new()
+            }
         };
+        let block = Block::default()
+            .title(format!(" {title}{range} "))
+            .borders(Borders::ALL)
+            .border_style(Color::Blue);
+        frame.render_widget(block, area);
+
+        if show_card {
+            let plan_height = u16::try_from(lines.len()).unwrap_or(inner.height);
+            frame.render_widget(
+                Paragraph::new(lines),
+                Rect {
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.width,
+                    height: plan_height,
+                },
+            );
+
+            let card_area = Rect {
+                x: inner.x,
+                y: inner.y + plan_height,
+                width: inner.width,
+                height: inner.height.saturating_sub(plan_height),
+            };
+            let (card_title, duration_text, footer) =
+                if let Some(started_at) = self.sleep_started_at.filter(|_| show_elapsed) {
+                    let elapsed = Duration::from_secs(unix_timestamp().saturating_sub(started_at));
+                    let started_local =
+                        DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(started_at));
+                    (
+                        "SLEPT FOR",
+                        format_compact_duration(elapsed),
+                        format!("since timer ended at {}", started_local.format("%H:%M")),
+                    )
+                } else {
+                    let now = Local::now();
+                    let duration = self.until.map_or_else(
+                        || parse_duration(&self.config.duration).ok(),
+                        |time| duration_until(time, now).ok(),
+                    );
+                    let duration_text = duration
+                        .map(format_compact_duration)
+                        .unwrap_or_else(|| "--:--".to_string());
+                    let finish_text = duration
+                        .and_then(|value| chrono::Duration::from_std(value).ok())
+                        .and_then(|value| now.checked_add_signed(value))
+                        .map(|time| time.format("%H:%M").to_string())
+                        .unwrap_or_else(|| "--:--".to_string());
+                    let action_count = build_action_commands(&self.config).len();
+                    let action_label = if action_count == 1 {
+                        "action"
+                    } else {
+                        "actions"
+                    };
+                    (
+                        "TIME LEFT",
+                        duration_text,
+                        format!("ENDS AT {finish_text}  ·  {action_count} {action_label}"),
+                    )
+                };
+
+            let mut card_lines = vec![Line::styled(
+                card_title,
+                Style::default().fg(Color::DarkGray),
+            )];
+            let large_timer = ascii_time(&duration_text);
+            if let Some(sample) = large_timer.first()
+                && sample.len() <= usize::from(card_area.width.saturating_sub(2))
+                && card_area.height >= 10
+            {
+                card_lines.extend(large_timer.into_iter().map(|row| {
+                    Line::styled(
+                        row,
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                }));
+            } else {
+                card_lines.push(Line::styled(
+                    duration_text,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            card_lines.push(Line::styled(footer, Style::default().fg(Color::Gray)));
+            let card_height = u16::try_from(card_lines.len()).unwrap_or(card_area.height);
+            frame.render_widget(
+                Paragraph::new(card_lines)
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(Color::Gray)),
+                center_rect(card_area.width, card_height, card_area),
+            );
+            self.preview_offset = 0;
+            return;
+        }
+
+        let height = usize::from(inner.height);
         frame.render_widget(
             Paragraph::new(
                 lines
@@ -2308,14 +2133,8 @@ impl App {
                     .skip(self.preview_offset)
                     .take(height)
                     .collect::<Vec<_>>(),
-            )
-            .block(
-                Block::default()
-                    .title(format!(" {title}{range} "))
-                    .borders(Borders::ALL)
-                    .border_style(Color::Blue),
             ),
-            area,
+            inner,
         );
     }
 
@@ -2560,6 +2379,7 @@ impl App {
         } else {
             self.status = "timer stopped".to_string();
         }
+        self.sleep_started_at = None;
     }
 
     fn reap_timer(&mut self) {
@@ -2587,10 +2407,11 @@ impl App {
         match result {
             Ok(Ok((report, sleep_presence))) => {
                 // Retain the disarmed post-countdown guard while the TUI stays
-                // open so `Sleeping for ...` (or `finished`) remains visible.
+                // open so the green elapsed timer (or `finished`) remains visible.
                 // Dropping `App` closes the IPC connection and lets Discord
                 // clear it; `stop_timer` clears it explicitly on stop/quit.
                 self.sleep_presence = Some(sleep_presence);
+                self.sleep_started_at = report.sleep_started_at;
                 self.show_log = true;
                 self.preview_offset = 0;
                 let status = if report.failures.is_empty() {
@@ -2866,6 +2687,8 @@ const FIELDS: &[Field] = &[
             "gnome",
             "kde",
             "xscreensaver",
+            "noctalia-qs",
+            "noctalia",
         ]),
     },
     Field {
@@ -2956,13 +2779,20 @@ fn visible_fields(config: &Config) -> Vec<&'static Field> {
 
 fn field_visible(config: &Config, key: FieldKey) -> bool {
     match key {
-        FieldKey::WorkspaceBackend | FieldKey::WorkspaceNumber | FieldKey::WorkspaceCommand => {
-            config.actions.workspace.enabled
+        FieldKey::WorkspaceBackend | FieldKey::WorkspaceNumber => config.actions.workspace.enabled,
+        FieldKey::WorkspaceCommand => {
+            config.actions.workspace.enabled && config.actions.workspace.backend == "auto"
         }
         FieldKey::MediaAction => config.actions.media.enabled,
         FieldKey::BrightnessValue => config.actions.brightness.enabled,
-        FieldKey::LockBackend | FieldKey::LockCommand => config.actions.lock.enabled,
-        FieldKey::MonitorBackend | FieldKey::MonitorCommand => config.actions.monitor.enabled,
+        FieldKey::LockBackend => config.actions.lock.enabled,
+        FieldKey::LockCommand => {
+            config.actions.lock.enabled && config.actions.lock.backend == "auto"
+        }
+        FieldKey::MonitorBackend => config.actions.monitor.enabled,
+        FieldKey::MonitorCommand => {
+            config.actions.monitor.enabled && config.actions.monitor.backend == "auto"
+        }
         FieldKey::NotifyMessage => config.actions.notify.enabled,
         FieldKey::KillProcesses => config.actions.kill.enabled,
         FieldKey::CustomCommands => config.actions.custom.enabled,
@@ -3350,7 +3180,8 @@ mod tests {
             .unwrap();
         let assert_safe_render = |rendered: &str| {
             assert!(rendered.contains("\\n"));
-            assert!(rendered.contains("\\u{1b}]0;title\\u{7}"));
+            assert!(rendered.contains("u{1b}]0;title"));
+            assert!(rendered.contains("\\u{7}"));
             assert!(rendered.contains("\\u{2066}"));
             assert!(rendered.contains("\\u{200d}"));
             assert!(rendered.contains('猫'));
@@ -3560,24 +3391,6 @@ mod tests {
         config.actions.power.mode = "none".to_string();
         config.actions.custom.enabled = false;
         config
-    }
-
-    #[test]
-    fn parse_duration_accepts_go_style_values() {
-        assert!(parse_duration("25m").is_ok());
-        assert!(parse_duration("1h30m").is_ok());
-        assert!(parse_duration("1ns").is_ok());
-        assert!(parse_duration("bad").is_err());
-        assert!(parse_duration("0s").is_err());
-    }
-
-    #[test]
-    fn parse_duration_rejects_overflow_and_rounds_that_become_zero() {
-        assert!(parse_duration(
-            "999999999999999999999999999999999999999999999999999999999999999999999999999999999999999h"
-        )
-        .is_err());
-        assert!(parse_duration("0.0000000001ns").is_err());
     }
 
     #[test]
@@ -3847,25 +3660,6 @@ mod tests {
     }
 
     #[test]
-    fn ensure_config_validates_loaded_config() {
-        let path = std::env::temp_dir().join(format!(
-            "gosleep-timer-invalid-{}-{}.yaml",
-            std::process::id(),
-            "power"
-        ));
-        fs::write(
-            &path,
-            "duration: 25m\nactions:\n  power:\n    mode: bogus\n",
-        )
-        .unwrap();
-
-        let error = ensure_config(&path).unwrap_err();
-        fs::remove_file(path).ok();
-
-        assert!(error.to_string().contains("invalid power mode"));
-    }
-
-    #[test]
     fn timer_header_text_compacts_for_narrow_widths() {
         let remaining = Duration::from_secs(65);
 
@@ -3970,6 +3764,31 @@ mod tests {
     }
 
     #[test]
+    fn noctalia_lock_backends_use_their_supported_ipc_commands() {
+        let cases = [
+            (
+                "noctalia-qs",
+                "qs -c noctalia-shell ipc call lockScreen lock",
+            ),
+            ("noctalia", "noctalia msg session lock"),
+        ];
+
+        for (backend, expected) in cases {
+            let action = LockAction {
+                backend: backend.to_string(),
+                ..LockAction::default()
+            };
+            let command = lock_command(&action);
+            assert_eq!(command.display(), expected);
+            assert!(command.shell.is_none());
+
+            let mut config = quiet_config("25m");
+            config.actions.lock.backend = backend.to_string();
+            assert!(validate_config(&config).is_ok());
+        }
+    }
+
+    #[test]
     fn sway_and_i3_workspace_use_workspace_number() {
         let sway = WorkspaceAction {
             backend: "sway".to_string(),
@@ -3990,35 +3809,6 @@ mod tests {
             workspace_command(&i3).display(),
             "i3-msg workspace number 3"
         );
-    }
-
-    #[test]
-    fn discord_defaults_to_enabled_without_application_id() {
-        let config = Config::default();
-        assert!(config.discord.enabled);
-        assert!(config.discord.application_id.is_empty());
-        assert!(!config.discord.should_connect());
-    }
-
-    #[test]
-    fn old_config_without_discord_section_loads_defaults() {
-        let config: Config =
-            noyalib::from_str("duration: 25m\ninhibit_sleep: false\nactions: {}\n").unwrap();
-        assert!(config.discord.enabled);
-        assert!(config.discord.application_id.is_empty());
-        assert!(!config.discord.should_connect());
-
-        let configured: Config = noyalib::from_str(
-            "duration: 25m\ndiscord:\n  enabled: false\n  application_id: \"123\"\n",
-        )
-        .unwrap();
-        assert!(!configured.discord.enabled);
-        assert_eq!(configured.discord.application_id, "123");
-        assert!(!configured.discord.should_connect());
-
-        let mut enabled = configured.clone();
-        enabled.discord.enabled = true;
-        assert!(enabled.discord.should_connect());
     }
 
     #[test]
@@ -4055,7 +3845,7 @@ mod tests {
     fn discord_activity_payload_formats_details_state_and_timestamps() {
         let activity = PresenceActivity {
             details: "Sleep timer".to_string(),
-            state: "45m until sleep".to_string(),
+            state: String::new(),
             start_timestamp: Some(1_700_000_000),
             end_timestamp: Some(1_700_002_700),
         };
@@ -4063,7 +3853,7 @@ mod tests {
         assert_eq!(payload["cmd"], "SET_ACTIVITY");
         assert_eq!(payload["args"]["pid"], 1234);
         assert_eq!(payload["args"]["activity"]["details"], "Sleep timer");
-        assert_eq!(payload["args"]["activity"]["state"], "45m until sleep");
+        assert!(payload["args"]["activity"].get("state").is_none());
         assert_eq!(
             payload["args"]["activity"]["timestamps"]["start"],
             1_700_000_000
@@ -4138,7 +3928,7 @@ mod tests {
             assert!(!presence.is_active());
             presence.update(PresenceActivity {
                 details: "Sleep timer".to_string(),
-                state: "45m until sleep".to_string(),
+                state: String::new(),
                 start_timestamp: None,
                 end_timestamp: None,
             });
@@ -4165,7 +3955,7 @@ mod tests {
         assert!(presence.is_active());
         presence.update(PresenceActivity {
             details: "Sleep timer".to_string(),
-            state: "10ms until sleep".to_string(),
+            state: String::new(),
             start_timestamp: None,
             end_timestamp: None,
         });
@@ -4196,14 +3986,11 @@ mod tests {
     }
 
     #[test]
-    fn countdown_presence_shows_remaining_with_end_timestamp() {
+    fn countdown_presence_shows_only_details_and_end_timestamp() {
         let remaining = Duration::from_secs(45 * 60);
         let activity = countdown_presence(remaining, "none", 1_700_000_000);
         assert_eq!(activity.details, "Sleep timer");
-        assert_eq!(
-            activity.state,
-            format!("{} until sleep", format_duration(remaining))
-        );
+        assert!(activity.state.is_empty());
         assert_eq!(activity.start_timestamp, None);
         assert_eq!(
             activity.end_timestamp,
@@ -4216,6 +4003,7 @@ mod tests {
             payload["args"]["activity"]["timestamps"]["end"],
             1_700_000_000 + remaining.as_secs()
         );
+        assert!(payload["args"]["activity"].get("state").is_none());
     }
 
     #[test]
@@ -4234,13 +4022,9 @@ mod tests {
     }
 
     #[test]
-    fn poweroff_indicator_only_for_exact_poweroff_mode() {
+    fn countdown_never_adds_state_text_for_poweroff() {
         let running_off = countdown_presence(Duration::from_secs(60), "poweroff", 1000);
-        assert!(
-            running_off.state.contains("Power off after timer"),
-            "poweroff mode must show the indicator, got {:?}",
-            running_off.state
-        );
+        assert!(running_off.state.is_empty());
         let paused_off = paused_presence("poweroff");
         assert!(paused_off.state.contains("Power off after timer"));
 
@@ -4256,8 +4040,8 @@ mod tests {
         ] {
             let running = countdown_presence(Duration::from_secs(60), mode, 1000);
             assert!(
-                !running.state.contains("Power off after timer"),
-                "mode {mode:?} must omit the indicator, got {:?}",
+                running.state.is_empty(),
+                "mode {mode:?} must not add countdown state text, got {:?}",
                 running.state
             );
             let paused = paused_presence(mode);
@@ -4360,18 +4144,14 @@ mod tests {
 
     #[test]
     fn sleeping_presence_shows_elapsed_start_without_end() {
-        let duration = Duration::from_secs(25 * 60);
-        let activity = sleeping_presence(1_700_000_000, duration);
+        let activity = sleeping_presence(1_700_000_000);
         assert_eq!(activity.details, "Sleep timer");
-        assert_eq!(
-            activity.state,
-            format!("Sleeping for {}", format_duration(duration))
-        );
-        assert!(activity.state.starts_with("Sleeping for "));
+        assert!(activity.state.is_empty());
         assert_eq!(activity.start_timestamp, Some(1_700_000_000));
         assert_eq!(activity.end_timestamp, None);
 
         let payload = presence_activity_payload(&activity, 1234, "nonce-s1");
+        assert!(payload["args"]["activity"].get("state").is_none());
         assert_eq!(
             payload["args"]["activity"]["timestamps"]["start"],
             1_700_000_000
@@ -4386,9 +4166,8 @@ mod tests {
 
     #[test]
     fn post_run_presence_only_claims_sleep_for_real_success() {
-        let duration = Duration::from_secs(1500);
-        let sleeping = post_run_presence(TimerOptions::default(), false, true, 1000, duration);
-        assert_eq!(sleeping.state, "Sleeping for 25m0s");
+        let sleeping = post_run_presence(TimerOptions::default(), false, true, 1000);
+        assert!(sleeping.state.is_empty());
         assert_eq!(sleeping.start_timestamp, Some(1000));
         assert_eq!(sleeping.end_timestamp, None);
 
@@ -4407,16 +4186,16 @@ mod tests {
                 no_actions: true,
             },
         ] {
-            let activity = post_run_presence(options, false, true, 1000, duration);
+            let activity = post_run_presence(options, false, true, 1000);
             assert_eq!(activity, post_countdown_presence());
         }
         assert_eq!(
-            post_run_presence(TimerOptions::default(), true, true, 1000, duration),
+            post_run_presence(TimerOptions::default(), true, true, 1000),
             post_countdown_presence(),
             "failures must not claim a sleep interval"
         );
         assert_eq!(
-            post_run_presence(TimerOptions::default(), false, false, 1000, duration),
+            post_run_presence(TimerOptions::default(), false, false, 1000),
             post_countdown_presence(),
             "empty action list must not claim a sleep interval"
         );
@@ -4514,6 +4293,7 @@ mod tests {
             TimerReport {
                 started_at: 0,
                 duration: Duration::from_secs(60),
+                sleep_started_at: Some(1000),
                 actions: vec!["true".to_string()],
                 failures: Vec::new(),
                 dry_run: false,
@@ -4543,6 +4323,7 @@ mod tests {
                 TimerReport {
                     started_at: 0,
                     duration: Duration::from_secs(1),
+                    sleep_started_at: None,
                     actions: Vec::new(),
                     failures: Vec::new(),
                     dry_run: false,

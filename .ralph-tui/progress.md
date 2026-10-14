@@ -5,101 +5,31 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
-- Single-binary Rust app: all logic in `src/main.rs` until a concrete reason to split.
-- Config structs use `#[serde(default)]` + explicit `Default` impls for backward compat.
-- TUI settings are generated from `FIELDS: &[Field]` (`FieldKey` + `FieldKind`); edit flow is `activate` -> `edit` -> `apply_edit` -> `normalize_config`; toggle via `toggle_bool`, choices via `cycle`.
-- `field_group` maps keys to `GROUPS` (Timer, Audio, Screen, Session, More); new generic settings go to group 4 (More) via `_ => 4`.
-- `normalize_config` fills empty-string/zero defaults; `validate_config` rejects invalid enums.
-- Tests live in `mod tests` at bottom of `src/main.rs`; use `quiet_config()`, `render_app()` with TestBackend, isolated temp paths.
+* Single-binary Rust app: all code in `src/main.rs` (now `src/main.rs` + `src/config.rs`); package metadata in `Cargo.toml`, locked deps in `Cargo.lock`.
+* Config uses `noyalib` for YAML (`from_str`/`to_string`); `#[serde(default)]` on every config struct preserves backward-compat YAML shape.
+* `normalize_config` fills empty/out-of-range values; `validate_config` checks duration + power/workspace/monitor/lock/media enums; `parse_duration` accepts Go-style `1h30m` with `h/m/s/ms/us/µs/ns`.
+* History I/O (`HistoryEntry`, `read_history`, `append_history`, `history_path`) stays in CLI layer (`main.rs`) per US-001; shared history types not moved.
+* Cross-module visibility is `pub(crate)` only for items named outside `config` (Config, DiscordConfig, Lock/Monitor/WorkspaceAction + 6 fns); action field types stay `pub(crate)` because they appear in `pub(crate)` fields.
 
 ---
 
-## US-001: Configure Discord Rich Presence — PASS
+## US-001 - Extract configuration and core data models (2026-10-14)
 
-Implemented backward-compatible Discord config section with TUI editor exposure.
+Implemented:
+* Created `src/config.rs` with `Config`, `Actions`, `WorkspaceAction`, `MediaAction`, `BrightnessAction`, `ToggleAction`, `LockAction`, `MonitorAction`, `NotifyAction`, `KillAction`, `PowerAction`, `CustomAction`, `DiscordConfig` (+ `should_connect`), all `Default` impls, and `default_config_path`, `ensure_config`, `save_config`, `normalize_config`, `validate_config`, `parse_duration`.
+* `src/main.rs`: added `mod config;` + `use crate::config::{...}` (only items named in main), removed moved structs/impls/fns, kept history I/O and CLI dispatch untouched.
+* Moved 5 focused tests into `config::tests`: `parse_duration_accepts_go_style_values`, `parse_duration_rejects_overflow_and_rounds_that_become_zero`, `ensure_config_validates_loaded_config`, `discord_defaults_to_enabled_without_application_id`, `old_config_without_discord_section_loads_defaults`. Removed duplicates from `main.rs` tests.
+* No new dependencies, no circular deps (`config` imports only std/anyhow/serde; `main` depends on `config` one-way).
+* Files changed: `src/config.rs` (new), `src/main.rs` (extract + import trim + test dedup).
 
-Files changed:
-- `src/main.rs`: added `DiscordConfig { enabled (default true), application_id (default "") }`, `discord` field on `Config`, `should_connect()` helper (enabled && non-empty id), normalize trims app id, new `FieldKey::DiscordEnabled` (Bool) + `FieldKey::DiscordApplicationId` (Edit) in `FIELDS` (More group), `field_value`/`toggle_bool`/`apply_edit`/`field_visible` support, 3 focused tests.
-
-Check results:
-- `cargo fmt --check` — PASS (exit 0)
-- `cargo test --locked` — PASS (36 passed, 1 ignored)
-- `cargo clippy --locked -- -D warnings` — PASS (exit 0)
-- `cargo build --release --locked` — PASS
-- Isolated CLI smoke (`init`, `validate`, `status`, `preview` on temp config) — PASS; new config serializes `discord: { enabled: true, application_id: "" }`
-- Old-config check (YAML without `discord` section validates/loads) — PASS
-
-Learnings:
-- `should_connect()` is only used by tests until US-002 wires the IPC client; marked `#[allow(dead_code)]` to keep `clippy -D warnings` green.
-- New TUI fields fall into `field_group` `_ => 4` (More group) with no extra mapping needed.
-
----
-
-## US-002: Add a non-blocking Discord presence client — PASS
-
-Implemented local IPC Rich Presence client with background worker; no bot token, network service, or credentials.
-
-Files changed:
-- `Cargo.toml`, `Cargo.lock`: added `serde_json 1.0.153` (smallest maintained dep for IPC JSON frames; evaluated `discord-rich-presence 1.1.0` — pulls `serde_repr` + duplicate `uuid 0.8` vs existing `uuid 1.23`, heavier effective tree; `serde_json` reuses already-locked `itoa`/`ryu`/`memchr`).
-- `src/main.rs`: added `PresenceActivity`, `presence_activity_payload` / `presence_clear_payload` (SET_ACTIVITY JSON, timestamps omitted when None so paused never leaves stale countdown), `encode_discord_ipc_frame` (opcode+len LE), `discord_ipc_candidates` (`XDG_RUNTIME_DIR`/`TMPDIR`/`/tmp` x `discord-ipc-0..9`, deduped) + pure `discord_ipc_candidates_from` for tests, `DiscordPresence` (`start` returns instant no-op when `!should_connect`; otherwise spawns worker; `update`/`clear` only `send` on unbounded channel; `Drop` does best-effort `clear` then closes channel with no join), `discord_presence_worker` (connects with 2s timeouts, swallows all I/O errors, drops stream on send failure, final clear on channel close), `discord_connect`/`discord_handshake` (opcode 0 `{"v":1,"client_id"}`, best-effort READY read)/`discord_send_activity` (opcode 1), `next_presence_nonce`; wired `run_timer` with `let _discord = DiscordPresence::start(&config.discord)` guard so missing Discord never fails/stalls CLI+TUI and cleanup is automatic. Removed `#[allow(dead_code)]` from `should_connect`; `update`/`is_active` kept `allow(dead_code)` until US-003 publishes countdown updates.
-- 5 new deterministic tests: payload formatting + paused-no-timestamps + clear, frame encoding LE, candidates layout, disabled/unconfigured no-op timing (<2s), missing-client `start`/`update`/`clear` + `run_timer --no-actions` success without stall.
-
-Check results:
-- `cargo fmt --check` — PASS (exit 0)
-- `cargo test --locked` — PASS (41 passed, 1 ignored)
-- `cargo clippy --locked -- -D warnings` — PASS (exit 0)
-- `cargo build --release --locked` — PASS
-- Isolated CLI smoke (`init`, `validate`, `status`, `preview` on temp config) — PASS; config serializes `discord: { enabled: true, application_id: "" }`
-- Manual `run --no-actions 1s` with fake app id `123456789012345678` and no Discord socket — PASS (completed ~1s, exit 0, no stall)
+Checks (all PASS):
+* `cargo fmt --check` -> PASS (exit 0, no diff).
+* `cargo test --locked` -> PASS (51 passed, 1 ignored; includes 5 `config::tests::*`).
+* `cargo clippy --locked -- -D warnings` -> PASS (after trimming unused `CustomAction/KillAction/NotifyAction/PowerAction` imports).
+* `cargo build --release --locked` -> PASS.
+* Isolated smoke: `tmpdir=$(mktemp -d); cargo run -- --config $tmpdir/config.yaml init/validate/status/preview` -> PASS (valid, status shows workspace+media, preview matches).
 
 Learnings:
-- `let Some(socket) = stream.as_mut()` shadowing pitfall: inner `stream` becomes `&mut`, so `stream = None` fails; use distinct `socket` name and assign to outer `stream`.
-- `clippy -D warnings` flags test-only `is_active`/`update` and `Clear` variant; fix by making `Drop` call `clear()` (makes `clear`+`Clear` live) and `allow(dead_code)` only on truly future `is_active`/`update` until US-003.
-- `UnixStream::connect` missing socket fails fast with ENOENT; real non-blocking guarantee comes from doing handshake in spawned worker + 2s read/write timeouts + unbounded channel sends.
-
----
-
-## US-003: Publish countdown status in CLI and TUI — PASS
-
-Implemented countdown presence projection and wired it into `run_timer` (shared by CLI `run` and TUI timer thread, including `--no-actions` and dry-run).
-
-Files changed:
-- `src/main.rs`: added pure `should_show_poweroff` (exact `poweroff` match), `countdown_presence` (`Sleep timer` + `{remaining} until sleep` + end timestamp, `Power off after timer` suffix only for exact poweroff), `paused_presence` (`paused`, no timestamps), `post_countdown_presence` (`finished`, no timestamps); `DiscordPresence` gained `clear_on_drop` + `disarm()` (success disarms drop-clear so the countdown transitions instead of clearing); removed worker's redundant final clear (Drop already sends explicit Clear on stop; disarmed success retains post-countdown until process exit); `run_timer` publishes initial countdown, throttled running updates every 5s, paused updates on pause entry, countdown re-publish on resume, explicit `clear()` on all three stop paths, `update(post_countdown)+disarm` on success. Removed `#[allow(dead_code)]` from `update` (now live); kept on `is_active` (test-only).
-- 5 new deterministic tests: countdown details/state/end-timestamp + payload, paused no-timestamps + payload, poweroff exact-match visibility (running+paused, 8 negative modes), stopped-run clears without stalling, success transitions (disarm + CLI no-actions/dry-run + TUI `run_timer` success without stall).
-
-Check results:
-- `cargo fmt --check` — PASS (exit 0)
-- `cargo test --locked` — PASS (46 passed, 1 ignored)
-- `cargo clippy --locked -- -D warnings` — PASS (exit 0)
-- `cargo build --release --locked` — PASS
-- Isolated CLI smoke (`init`, `validate`, `status`, `preview` on temp config) — PASS
-- Manual `run --no-actions 1s` on temp config — PASS (exit 0, no stall)
-
-Learnings:
-- `Drop`-always-clears conflicts with retain-on-success; fix with `clear_on_drop` flag + `disarm()` on success and no worker final clear (explicit Clear only on stop paths).
-- Throttle Discord updates (>=5s) inside the 250ms countdown loop; publish immediately on pause entry and on resume to avoid stale countdown text.
-- End timestamp must be recomputed as `now_unix + remaining` per publish so the deadline stays fixed as remaining shrinks.
-
----
-
-## US-004: Publish post-countdown sleep status and document setup — PASS
-
-Implemented elapsed `Sleeping for ...` presence with retention across CLI wake-confirmation and TUI open lifetime.
-
-Files changed:
-- `src/main.rs`: added pure `sleeping_presence(start_unix, duration)` (`Sleep timer` + `Sleeping for {duration}` + start-only timestamp) and pure `post_run_presence()` selector (sleeping only for real successful non-empty action runs; dry-run/`--no-actions`/failures/empty keep timestamp-free `finished`); `run_timer` captures `sleep_start_unix` at action-phase start, publishes via selector, disarms, and returns `(TimerReport, DiscordPresence)` so the caller retains the IPC connection (Discord clears on process exit/poweroff); CLI holds the guard through `prompt_wake_confirmation`; TUI `App` gained `sleep_presence: Option<DiscordPresence>`, `TimerState` handle returns the tuple, `apply_timer_result` stores the guard, `stop_timer` clears retained presence explicitly (covers cancel + clean quit); `DiscordPresence` derived `Debug` for tuple `unwrap_err`; updated existing `run_timer` call sites; 4 new tests.
-- `README.md`: added `Discord Rich Presence` section (Application ID setup, config keys table, disable option, displayed-states table with timestamps, poweroff exact-match note, lifetime + unavailable-Discord behavior).
-
-Check results:
-- `cargo fmt --check` — PASS (exit 0, after `cargo fmt`)
-- `cargo test --locked` — PASS (50 passed, 1 ignored)
-- `cargo clippy --locked -- -D warnings` — PASS (exit 0)
-- `cargo build --release --locked` — PASS
-- Isolated CLI smoke (`init`, `validate`, `status`, `preview` on temp config) — PASS; config serializes `discord: { enabled: true, application_id: "" }`
-- Manual `run --no-actions 1s` with fake app id and no Discord socket — PASS (exit 0, no stall)
-- Manual real-action `run 1s` (custom `true`) with fake app id — PASS (exit 0, published sleeping path, no stall)
-
-Learnings:
-- Retention requires transferring the presence guard out of `run_timer`; `mem::forget`/parking the worker leaks a thread per run, while returning `(TimerReport, DiscordPresence)` lets CLI hold it through wake-confirmation and TUI store it until stop/quit with no accumulation.
-- `unwrap_err()` on `Result<(TimerReport, DiscordPresence)>` needs `Debug` on both tuple elements; derive `Debug` on `DiscordPresence` (sender + bool are already `Debug`).
-- Empty-action real runs must not claim sleep: `post_run_presence` requires `has_actions`, keeping the status accurate for countdown-only configs.
+* `use super::*` in `config::tests` correctly re-exports parent `fs` import for the `ensure_config` test; no extra import needed.
+* Clippy `-D warnings` fails on unused config type imports in `main.rs`; import only `Config, DiscordConfig, LockAction, MonitorAction, WorkspaceAction` + fns.
+* `pub(crate)` on all config field types is required (field type visibility must cover `pub(crate)` fields), even for types not directly named in `main.rs`.

@@ -1,0 +1,163 @@
+{
+  "name": "Modularize gosleep-timer main.rs",
+  "description": "Refactor the 4,753-line src/main.rs into cohesive Rust modules while preserving CLI, configuration, timer, Discord IPC, and TUI behavior. Keep the change incremental, avoid new dependencies, and retain the existing tests.",
+  "branchName": "ralph/modularize-main-rs",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Extract configuration and core data models",
+      "description": "As a maintainer, I want configuration models and their defaults, normalization, validation, and duration parsing in a focused module so that configuration behavior has a clear owner.",
+      "acceptanceCriteria": [
+        "Create a config module for Config, Actions, action configuration types, defaults, config load/save, normalization, validation, and duration parsing; keep history I/O with CLI integration unless a shared type requires a small core model module.",
+        "Update callers to use the module without changing YAML shape, defaults, validation errors, duration parsing, or config paths.",
+        "Move or keep the relevant existing tests with the extracted code, including defaults, validation, and duration parsing coverage.",
+        "Use crate visibility only for items needed across module boundaries; do not add dependencies or create circular module dependencies.",
+        "cargo fmt --check passes.",
+        "cargo test --locked passes.",
+        "cargo clippy --locked -- -D warnings passes.",
+        "cargo build --release --locked passes."
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-002",
+      "title": "Extract action planning and command display",
+      "description": "As a maintainer, I want action command construction, preview formatting, and terminal-safe display logic in an actions module so that command planning can be understood and tested independently.",
+      "acceptanceCriteria": [
+        "Move ActionCommand, action command builders, preview command generation, and command display/safety helpers into an actions module that uses the config module from US-001.",
+        "Preserve command arguments, ordering, enabled-action filtering, danger classification, shell execution strings, and escaped preview output exactly.",
+        "Keep or move the existing action planning and terminal-control escaping tests with the code they cover.",
+        "Do not execute real system or custom commands during tests.",
+        "cargo fmt --check passes.",
+        "cargo test --locked passes.",
+        "cargo clippy --locked -- -D warnings passes.",
+        "cargo build --release --locked passes."
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "",
+      "dependsOn": [
+        "US-001"
+      ]
+    },
+    {
+      "id": "US-003",
+      "title": "Extract Discord presence and IPC",
+      "description": "As a maintainer, I want Discord presence payloads, socket discovery, IPC, and worker lifecycle in a dedicated module so this integration stays separate from timer and TUI code.",
+      "acceptanceCriteria": [
+        "Move DiscordConfig and Discord presence/IPC implementation into a discord module with a small crate-visible interface for timer and TUI callers.",
+        "Preserve socket candidate ordering, IPC framing and handshake, presence payloads, update/clear behavior, and worker shutdown semantics.",
+        "Keep or move the existing Discord payload, framing, candidate, and lifecycle tests with the module.",
+        "Do not add a Discord SDK or other dependency.",
+        "cargo fmt --check passes.",
+        "cargo test --locked passes.",
+        "cargo clippy --locked -- -D warnings passes.",
+        "cargo build --release --locked passes."
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "",
+      "dependsOn": [
+        "US-001"
+      ]
+    },
+    {
+      "id": "US-004",
+      "title": "Extract timer execution and reports",
+      "description": "As a maintainer, I want countdown execution, action launching, timer reporting, and history entry conversion in a timer module so runtime behavior has a cohesive boundary.",
+      "acceptanceCriteria": [
+        "Move timer options, reports, run modes, countdown execution, child command handling, and report-to-history conversion into a timer module using the config and actions modules.",
+        "Keep history file presentation and CLI dispatch in the CLI layer; place shared history data types in the narrowest suitable module.",
+        "Preserve pause, resume, stop, cancellation, action-result reporting, child output handling, wake confirmation inputs, and timer status behavior.",
+        "Keep or move existing timer/runtime tests; tests must use controlled commands and must not invoke destructive system actions.",
+        "cargo fmt --check passes.",
+        "cargo test --locked passes.",
+        "cargo clippy --locked -- -D warnings passes.",
+        "cargo build --release --locked passes."
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "",
+      "dependsOn": [
+        "US-002",
+        "US-003"
+      ]
+    },
+    {
+      "id": "US-005",
+      "title": "Extract TUI fields and pure view helpers",
+      "description": "As a maintainer, I want TUI field definitions, visibility rules, formatting, and layout helpers in focused TUI support modules so settings and rendering rules are easier to find.",
+      "acceptanceCriteria": [
+        "Create a tui module structure and move field metadata, field visibility, edit-view formatting, duration/countdown formatting, and pure layout or text-wrapping helpers into cohesive submodules.",
+        "Preserve field order, groups, hints, edit validation behavior, Unicode handling, compact layouts, wrapping, and terminal-control escaping.",
+        "Keep or move the existing pure helper and field behavior tests beside the modules they cover.",
+        "Keep Ratatui TestBackend coverage for relevant layout behavior; do not introduce terminal-size assumptions.",
+        "cargo fmt --check passes.",
+        "cargo test --locked passes.",
+        "cargo clippy --locked -- -D warnings passes.",
+        "cargo build --release --locked passes."
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "",
+      "dependsOn": [
+        "US-001",
+        "US-002"
+      ]
+    },
+    {
+      "id": "US-006",
+      "title": "Move TUI app and rendering into the TUI module",
+      "description": "As a maintainer, I want TUI application state, input handling, drawing, and event-loop orchestration in the TUI module so terminal UI behavior is independent of CLI wiring.",
+      "acceptanceCriteria": [
+        "Move App and its state, run_tui, event handling, timer-worker coordination, and rendering methods into the tui module, using the helpers from US-005 and the config, actions, timer, and discord interfaces.",
+        "Keep module dependencies one-way and limit cross-module visibility to the items required by callers.",
+        "Preserve keyboard controls, editing and cancel behavior, save behavior, timer controls, preview content, narrow and wide layouts, and worker result delivery.",
+        "Keep or move all existing TUI rendering and interaction tests; retain TestBackend checks for both compact and wide layouts.",
+        "cargo fmt --check passes.",
+        "cargo test --locked passes.",
+        "cargo clippy --locked -- -D warnings passes.",
+        "cargo build --release --locked passes."
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "",
+      "dependsOn": [
+        "US-004",
+        "US-005"
+      ]
+    },
+    {
+      "id": "US-007",
+      "title": "Extract CLI handlers and slim the binary entry point",
+      "description": "As a maintainer, I want command dispatch and config, status, history, and stats handlers in a CLI module so main.rs becomes a small application entry point.",
+      "acceptanceCriteria": [
+        "Move CLI command handling, config and history path operations, status/history/stats output, and wake-confirmation prompting into a cohesive CLI module; keep clap argument definitions and main dispatch minimal and clear.",
+        "Wire all modules through main.rs without changing command names, flags, output contracts, exit behavior, or config/history file formats.",
+        "Remove obsolete imports and dead code; src/main.rs should contain only binary setup, module declarations, and concise command dispatch rather than feature implementations.",
+        "Preserve existing tests and run isolated smoke checks with a temporary config for init, validate, status, and preview; do not run against the user's real config or start an action-enabled timer.",
+        "cargo fmt --check passes.",
+        "cargo test --locked passes.",
+        "cargo clippy --locked -- -D warnings passes.",
+        "cargo build --release --locked passes."
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "",
+      "dependsOn": [
+        "US-001",
+        "US-002",
+        "US-003",
+        "US-004",
+        "US-006"
+      ]
+    }
+  ],
+  "metadata": {
+    "updatedAt": "2026-10-14T08:49:23.229Z"
+  }
+}

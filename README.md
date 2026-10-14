@@ -117,14 +117,15 @@ gosleep-timer --config ./config.yaml preview
 | --- | --- |
 | `j` / `Down` | Move down |
 | `k` / `Up` | Move up |
-| `Tab` / `Shift+Tab` | Select next/previous settings group |
+| `Left` / `Right`, `Tab` / `Shift+Tab` | Select previous/next settings group |
 | `Space` / `Enter` | Toggle, cycle, or edit focused field |
 | `1` / `2` / `3` | Set duration to 30 minutes / 1 hour / 2 hours |
 | `l` | Switch between the action plan and results |
 | `PageUp` / `PageDown` | Scroll the action plan or results |
 | `Enter` while editing | Apply edit |
 | `Esc` while editing | Cancel edit |
-| `Left` / `Right`, `Home` / `End` while editing | Move the text cursor |
+| `Left` / `Right` while editing | Move the text cursor instead of switching groups |
+| `Home` / `End` while editing | Move the text cursor |
 | `Backspace` / `Delete` while editing | Delete before/after the cursor |
 | `r` | Start/restart timer |
 | `p` | Pause/resume running timer |
@@ -204,13 +205,17 @@ Supported values:
 | --- | --- |
 | `duration` | Go-style duration strings such as `25m`, `45m`, `1h30m`, `10s` |
 | `actions.workspace.backend` | `auto`, `niri`, `hyprland`, `sway`, `i3`, `kde` |
+| `actions.lock.backend` | `auto`, `loginctl`, `hyprlock`, `swaylock`, `i3lock`, `gnome`, `kde`, `xscreensaver`, `noctalia-qs`, `noctalia` |
 | `actions.media.action` | `none`, `stop`, `pause`, `play-pause`, `next`, `previous` |
 | `actions.monitor.backend` | `auto`, `hyprland`, `niri`, `sway`, `kde`, `x11` |
 | `actions.power.mode` | `none`, `suspend`, `hibernate`, `hybrid-sleep`, `poweroff`, `reboot` |
 
 Native GNOME monitor power-off is not supported. The `auto` backend reports an
 action failure when it cannot find a supported backend. Use the custom monitor
-command for a desktop-specific command.
+command for a desktop-specific command. In the TUI, custom workspace, lock, and
+monitor command fields appear only with the `auto` backend. A custom command is
+used as its override in `auto` mode; selecting a specific backend uses that
+backend's built-in command.
 
 ## Commands Run After Countdown
 
@@ -244,6 +249,7 @@ Dangerous actions such as `pkill`, power actions, and common destructive custom 
 
 Completed timer sessions are appended to `history.yaml` next to the active config file.
 If no poweroff or reboot action is configured, CLI `run` asks for wake confirmation after the timer finishes and records the elapsed sleep time.
+After successful actions, the TUI keeps a live `slept for` counter. It starts when the countdown ends, just before post-countdown actions run, so it includes their execution time.
 
 ## Discord Rich Presence
 
@@ -281,27 +287,29 @@ leave `application_id` empty; either way no IPC connection is attempted.
 
 ### Displayed states
 
-`details` stays `Sleep timer`. `state` and timestamps change by phase:
+`details` stays `Sleep timer`. During the countdown, the state is omitted and
+Discord's green timestamp shows the remaining time. Other states and timestamps
+change by phase:
 
 | Phase | State | Timestamps |
 | --- | --- | --- |
-| Running | `<remaining> until sleep`, for example `25m0s until sleep` | Countdown end timestamp |
-| Running with `actions.power.mode: poweroff` | `<remaining> until sleep • Power off after timer` | Countdown end timestamp |
+| Running | — | Countdown end timestamp shown as Discord's green timer |
+| Running with `actions.power.mode: poweroff` | — | Countdown end timestamp shown as Discord's green timer |
 | Paused | `paused` (plus the poweroff suffix only for exact `poweroff`) | None, so no stale countdown is shown |
-| After successful real actions | `Sleeping for <duration>`, for example `Sleeping for 25m0s` | Start timestamp at the beginning of post-countdown actions, so Discord shows elapsed sleep time |
+| After successful real actions | — | Start timestamp at the beginning of post-countdown actions, so Discord shows only its green elapsed timer |
 | Dry-run, `--no-actions`, action failures, or no enabled actions | `finished` | None, so no sleep interval is claimed |
 | Stopped or cancelled | Presence is cleared | — |
 
-The `Power off after timer` suffix appears only when `actions.power.mode` is
-exactly `poweroff`. It is omitted for `none`, `suspend`, `hibernate`,
-`hybrid-sleep`, `reboot`, and every other value.
+While paused, the `Power off after timer` suffix appears only when
+`actions.power.mode` is exactly `poweroff`. It is omitted for `none`,
+`suspend`, `hibernate`, `hybrid-sleep`, `reboot`, and every other value.
 
 ### Lifetime and unavailable Discord
 
 - The countdown status is published by both CLI `run` and TUI timer runs,
   including `--no-actions` and dry-run runs.
-- After a successful real-action run, the elapsed `Sleeping for …` status
-  stays active while the TUI remains open and during the CLI
+- After a successful real-action run, the green elapsed timer stays active
+  while the TUI remains open and during the CLI
   wake-confirmation wait. Discord clears it when the process exits or the
   machine powers off or suspends.
 - Cancelling a run clears the presence. Quitting the TUI after a completed
