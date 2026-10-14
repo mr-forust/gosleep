@@ -6,3 +6,11 @@
 *.tmp
 *.bak
 .DS_Store
+
+# Ralph TUI runtime state and generated output
+/.ralph-tui/ralph.lock
+/.ralph-tui/session.json
+/.ralph-tui/session-meta.json
+/.ralph-tui/progress.md
+/.ralph-tui/iterations/
+/.ralph-tui/reports/
