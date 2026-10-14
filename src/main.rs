@@ -14,7 +14,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use chrono::{DateTime, Local, NaiveTime, TimeZone};
+use chrono::{DateTime, Local, NaiveTime};
 use clap::{Parser, Subcommand};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -34,10 +34,9 @@ mod actions;
 mod config;
 mod discord;
 mod timer;
+mod tui;
 
-use crate::actions::{
-    ActionCommand, build_action_commands, escape_terminal_text, preview_commands,
-};
+use crate::actions::{build_action_commands, escape_terminal_text, preview_commands};
 use crate::config::{
     Config, default_config_path, ensure_config, normalize_config, parse_duration, save_config,
     validate_config,
@@ -47,6 +46,14 @@ use crate::timer::{
     HistoryEntry, RunMode, TIMER_STOPPED_MSG, TimerOptions, TimerReport, format_duration,
     run_timer, unix_timestamp,
 };
+use crate::tui::fields::{
+    EditState, Field, FieldKey, FieldKind, GROUPS, duration_until, field_group, field_hint, on_off,
+    parse_clock_time, split_list, visible_fields,
+};
+use crate::tui::format::{
+    ascii_time, format_compact_duration, format_gauge_label, format_time_left_text,
+};
+use crate::tui::layout::{action_plan_lines, center_rect, edit_view, wrap_command};
 
 #[derive(Parser)]
 #[command(
@@ -319,103 +326,6 @@ impl Write for UpdateWriter {
     }
 }
 
-const GROUPS: &[&str] = &["Timer", "Audio", "Screen", "Session", "More"];
-
-fn field_group(key: FieldKey) -> usize {
-    match key {
-        FieldKey::Duration | FieldKey::UntilTime | FieldKey::InhibitSleep => 0,
-        FieldKey::MediaEnabled
-        | FieldKey::MediaAction
-        | FieldKey::MuteEnabled
-        | FieldKey::MuteInputEnabled => 1,
-        FieldKey::BrightnessEnabled
-        | FieldKey::BrightnessValue
-        | FieldKey::MonitorEnabled
-        | FieldKey::MonitorBackend
-        | FieldKey::MonitorCommand => 2,
-        FieldKey::WorkspaceEnabled
-        | FieldKey::WorkspaceBackend
-        | FieldKey::WorkspaceNumber
-        | FieldKey::WorkspaceCommand
-        | FieldKey::LockEnabled
-        | FieldKey::LockBackend
-        | FieldKey::LockCommand => 3,
-        _ => 4,
-    }
-}
-
-fn field_hint(field: Field) -> &'static str {
-    match field.key {
-        FieldKey::Duration => "Duration: 30m, 1h30m, 90s; clears until time",
-        FieldKey::UntilTime => "HH:MM local time; next occurrence; blank clears",
-        FieldKey::BrightnessValue => "Brightness: 0..100 percent",
-        FieldKey::WorkspaceNumber => "Workspace number: integer",
-        FieldKey::InhibitSleep => "Keep system awake while timer runs",
-        FieldKey::PowerMode => "System action after countdown",
-        _ => match field.kind {
-            FieldKind::Bool => "Space or Enter switches on/off",
-            FieldKind::Cycle(_) => "Space or Enter selects the next option",
-            FieldKind::Csv => "Separate process names with commas",
-            FieldKind::Semi => "Separate shell commands with semicolons",
-            _ => "Text: Enter applies; Esc discards the edit",
-        },
-    }
-}
-
-fn action_description(command: &ActionCommand, config: &Config) -> String {
-    match command.label {
-        "workspace" => format!("Switch to workspace {}", config.actions.workspace.number),
-        "media" => format!("Media: {}", config.actions.media.action),
-        "brightness" => format!("Set brightness to {}%", config.actions.brightness.value),
-        "mute" => "Mute speakers".to_string(),
-        "mute_input" => "Mute microphone".to_string(),
-        "monitor" => "Turn off monitors".to_string(),
-        "lock" => "Lock session".to_string(),
-        "notify" => "Send notification".to_string(),
-        "kill" => "Stop matching processes".to_string(),
-        "power" => format!("System: {}", config.actions.power.mode),
-        "custom" => "Run custom shell command".to_string(),
-        label => label.to_string(),
-    }
-}
-
-fn parse_clock_time(value: &str) -> Result<NaiveTime> {
-    let value = value.trim();
-    if value.len() != 5 || value.as_bytes().get(2).is_none_or(|ch| *ch != b':') {
-        bail!("expected local time HH:MM (00:00..23:59)");
-    }
-    NaiveTime::parse_from_str(value, "%H:%M").context("expected local time HH:MM (00:00..23:59)")
-}
-
-fn duration_until<T: TimeZone>(time: NaiveTime, now: DateTime<T>) -> Result<Duration> {
-    let zone = now.timezone();
-    for day in 0..=1 {
-        let date = now
-            .date_naive()
-            .checked_add_days(chrono::Days::new(day))
-            .context("date outside calendar range")?;
-        let local = date.and_time(time);
-        let resolved = zone.from_local_datetime(&local);
-        let missing = matches!(resolved, chrono::LocalResult::None);
-        if let Some(target) = [resolved.clone().earliest(), resolved.latest()]
-            .into_iter()
-            .flatten()
-            .filter(|target| target > &now)
-            .min_by_key(|target| target.timestamp())
-        {
-            return (target - now)
-                .to_std()
-                .context("end time must be in the future");
-        }
-        if missing && local > now.naive_local() {
-            bail!(
-                "that local time does not exist on {date} due to a clock change; choose another time"
-            );
-        }
-    }
-    bail!("cannot resolve the next local end time")
-}
-
 struct App {
     path: PathBuf,
     config: Config,
@@ -440,47 +350,6 @@ struct TimerState {
     remaining_ms: Arc<AtomicU64>,
     handle: thread::JoinHandle<Result<(TimerReport, DiscordPresence)>>,
     updates: mpsc::Receiver<String>,
-}
-
-struct EditState {
-    field: Field,
-    value: String,
-    cursor: usize,
-}
-
-fn edit_view(edit: &EditState, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    if width == 1 {
-        return "▌".to_string();
-    }
-    let value = escape_terminal_text(&edit.value);
-    let cursor = edit
-        .value
-        .get(..edit.cursor)
-        .map(|prefix| escape_terminal_text(prefix).len())
-        .unwrap_or(value.len());
-    let mut start = 0;
-    while Line::from(&value[start..cursor]).width() + 1 + usize::from(start > 0) > width {
-        start += value[start..]
-            .chars()
-            .next()
-            .map(char::len_utf8)
-            .unwrap_or(0);
-    }
-    let mut view = format!(
-        "{}{}▌",
-        if start > 0 { "‹" } else { "" },
-        &value[start..cursor]
-    );
-    for ch in value[cursor..].chars() {
-        if Line::from(format!("{view}{ch}")).width() > width {
-            break;
-        }
-        view.push(ch);
-    }
-    view
 }
 
 impl App {
@@ -676,7 +545,7 @@ impl App {
         if time_width > chunks[1].width || chunks[1].height < 7 {
             frame.render_widget(
                 Paragraph::new(format_time_left_text(
-                    self.timer.as_ref(),
+                    self.timer.is_some(),
                     remaining,
                     chunks[1].width,
                 ))
@@ -1480,503 +1349,14 @@ impl App {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Field {
-    label: &'static str,
-    key: FieldKey,
-    kind: FieldKind,
-}
-
-#[derive(Clone, Copy)]
-enum FieldKind {
-    Edit,
-    Bool,
-    Cycle(&'static [&'static str]),
-    Int,
-    Csv,
-    Semi,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FieldKey {
-    Duration,
-    UntilTime,
-    InhibitSleep,
-    WorkspaceEnabled,
-    WorkspaceBackend,
-    WorkspaceNumber,
-    WorkspaceCommand,
-    MediaEnabled,
-    MediaAction,
-    BrightnessEnabled,
-    BrightnessValue,
-    MuteEnabled,
-    MuteInputEnabled,
-    LockEnabled,
-    LockBackend,
-    LockCommand,
-    MonitorEnabled,
-    MonitorBackend,
-    MonitorCommand,
-    NotifyEnabled,
-    NotifyMessage,
-    KillEnabled,
-    KillProcesses,
-    PowerMode,
-    CustomEnabled,
-    CustomCommands,
-    DiscordEnabled,
-    DiscordApplicationId,
-}
-
-const FIELDS: &[Field] = &[
-    Field {
-        label: "duration",
-        key: FieldKey::Duration,
-        kind: FieldKind::Edit,
-    },
-    Field {
-        label: "until local time",
-        key: FieldKey::UntilTime,
-        kind: FieldKind::Edit,
-    },
-    Field {
-        label: "media enabled",
-        key: FieldKey::MediaEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "media key action",
-        key: FieldKey::MediaAction,
-        kind: FieldKind::Cycle(&["stop", "pause", "play-pause", "next", "previous", "none"]),
-    },
-    Field {
-        label: "mute enabled",
-        key: FieldKey::MuteEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "mic mute enabled",
-        key: FieldKey::MuteInputEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "brightness enabled",
-        key: FieldKey::BrightnessEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "brightness value",
-        key: FieldKey::BrightnessValue,
-        kind: FieldKind::Int,
-    },
-    Field {
-        label: "workspace enabled",
-        key: FieldKey::WorkspaceEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "workspace backend",
-        key: FieldKey::WorkspaceBackend,
-        kind: FieldKind::Cycle(&["auto", "niri", "hyprland", "sway", "i3", "kde"]),
-    },
-    Field {
-        label: "workspace number",
-        key: FieldKey::WorkspaceNumber,
-        kind: FieldKind::Int,
-    },
-    Field {
-        label: "workspace command",
-        key: FieldKey::WorkspaceCommand,
-        kind: FieldKind::Edit,
-    },
-    Field {
-        label: "lock enabled",
-        key: FieldKey::LockEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "lock backend",
-        key: FieldKey::LockBackend,
-        kind: FieldKind::Cycle(&[
-            "auto",
-            "loginctl",
-            "hyprlock",
-            "swaylock",
-            "i3lock",
-            "gnome",
-            "kde",
-            "xscreensaver",
-            "noctalia-qs",
-            "noctalia",
-        ]),
-    },
-    Field {
-        label: "lock command",
-        key: FieldKey::LockCommand,
-        kind: FieldKind::Edit,
-    },
-    Field {
-        label: "screen poweroff",
-        key: FieldKey::MonitorEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "screen poweroff backend",
-        key: FieldKey::MonitorBackend,
-        kind: FieldKind::Cycle(&["auto", "hyprland", "niri", "sway", "kde", "x11"]),
-    },
-    Field {
-        label: "screen poweroff command",
-        key: FieldKey::MonitorCommand,
-        kind: FieldKind::Edit,
-    },
-    Field {
-        label: "prevent sleep",
-        key: FieldKey::InhibitSleep,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "notification",
-        key: FieldKey::NotifyEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "notification message",
-        key: FieldKey::NotifyMessage,
-        kind: FieldKind::Edit,
-    },
-    Field {
-        label: "kill processes",
-        key: FieldKey::KillEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "kill processes",
-        key: FieldKey::KillProcesses,
-        kind: FieldKind::Csv,
-    },
-    Field {
-        label: "power",
-        key: FieldKey::PowerMode,
-        kind: FieldKind::Cycle(&[
-            "none",
-            "suspend",
-            "hibernate",
-            "hybrid-sleep",
-            "poweroff",
-            "reboot",
-        ]),
-    },
-    Field {
-        label: "custom enabled",
-        key: FieldKey::CustomEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "custom shell cmds",
-        key: FieldKey::CustomCommands,
-        kind: FieldKind::Semi,
-    },
-    Field {
-        label: "discord enabled",
-        key: FieldKey::DiscordEnabled,
-        kind: FieldKind::Bool,
-    },
-    Field {
-        label: "discord app id",
-        key: FieldKey::DiscordApplicationId,
-        kind: FieldKind::Edit,
-    },
-];
-
-fn visible_fields(config: &Config) -> Vec<&'static Field> {
-    FIELDS
-        .iter()
-        .filter(|field| field_visible(config, field.key))
-        .collect()
-}
-
-fn field_visible(config: &Config, key: FieldKey) -> bool {
-    match key {
-        FieldKey::WorkspaceBackend | FieldKey::WorkspaceNumber => config.actions.workspace.enabled,
-        FieldKey::WorkspaceCommand => {
-            config.actions.workspace.enabled && config.actions.workspace.backend == "auto"
-        }
-        FieldKey::MediaAction => config.actions.media.enabled,
-        FieldKey::BrightnessValue => config.actions.brightness.enabled,
-        FieldKey::LockBackend => config.actions.lock.enabled,
-        FieldKey::LockCommand => {
-            config.actions.lock.enabled && config.actions.lock.backend == "auto"
-        }
-        FieldKey::MonitorBackend => config.actions.monitor.enabled,
-        FieldKey::MonitorCommand => {
-            config.actions.monitor.enabled && config.actions.monitor.backend == "auto"
-        }
-        FieldKey::NotifyMessage => config.actions.notify.enabled,
-        FieldKey::KillProcesses => config.actions.kill.enabled,
-        FieldKey::CustomCommands => config.actions.custom.enabled,
-        FieldKey::Duration
-        | FieldKey::UntilTime
-        | FieldKey::InhibitSleep
-        | FieldKey::WorkspaceEnabled
-        | FieldKey::MediaEnabled
-        | FieldKey::BrightnessEnabled
-        | FieldKey::MuteEnabled
-        | FieldKey::MuteInputEnabled
-        | FieldKey::LockEnabled
-        | FieldKey::MonitorEnabled
-        | FieldKey::NotifyEnabled
-        | FieldKey::KillEnabled
-        | FieldKey::PowerMode
-        | FieldKey::CustomEnabled
-        | FieldKey::DiscordEnabled
-        | FieldKey::DiscordApplicationId => true,
-    }
-}
-
-fn on_off(value: bool) -> String {
-    if value { "on" } else { "off" }.to_string()
-}
-
-fn format_compact_duration(duration: Duration) -> String {
-    let total_seconds = duration.as_secs();
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let seconds = total_seconds % 60;
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes:02}:{seconds:02}")
-    }
-}
-
-fn format_time_left_text(timer: Option<&TimerState>, remaining: Duration, width: u16) -> String {
-    if timer.is_none() {
-        return "not running".to_string();
-    }
-
-    let full = format!("time left: {}", format_duration(remaining));
-    if full.len() <= width as usize {
-        return full;
-    }
-
-    let compact = format!("left: {}", format_compact_duration(remaining));
-    if compact.len() <= width as usize {
-        return compact;
-    }
-
-    format_compact_duration(remaining)
-}
-
-fn format_gauge_label(progress: f64) -> String {
-    format!("{:>3}%", (progress * 100.0).round() as u16)
-}
-
-fn ascii_time(value: &str) -> Vec<String> {
-    const GLYPH_WIDTH: usize = 10;
-    let mut rows = vec![String::new(); 7];
-    for ch in value.chars() {
-        let glyph = ascii_glyph(ch);
-        for (row, part) in rows.iter_mut().zip(glyph) {
-            if !row.is_empty() {
-                row.push(' ');
-            }
-            row.push_str(&format!("{part:<GLYPH_WIDTH$}"));
-        }
-    }
-    rows
-}
-
-fn ascii_glyph(ch: char) -> [&'static str; 7] {
-    match ch {
-        '0' => [
-            " ad8888ba ",
-            "d8\"    \"8b",
-            "8P      88",
-            "8b      d8",
-            "8b      d8",
-            "Y8a.  .a8P",
-            " \"Y8888Y\" ",
-        ],
-        '1' => [
-            "   88    ",
-            "  888    ",
-            "   88    ",
-            "   88    ",
-            "   88    ",
-            "   88    ",
-            " 888888  ",
-        ],
-        '2' => [
-            " ad8888ba ",
-            "d8\"    \"8b",
-            "      ,8P",
-            "    ,d8P ",
-            "  ,d8P'  ",
-            " d8P'    ",
-            "888888888",
-        ],
-        '3' => [
-            " ad8888ba ",
-            "d8\"    \"8b",
-            "      ,8P",
-            "   aad8\" ",
-            "      `8b",
-            "Y8a.  .a8P",
-            " \"Y8888Y\" ",
-        ],
-        '4' => [
-            "88     88",
-            "88     88",
-            "88     88",
-            "888888888",
-            "       88",
-            "       88",
-            "       88",
-        ],
-        '5' => [
-            "888888888",
-            "88       ",
-            "88       ",
-            "888888ba ",
-            "       8b",
-            "Y8a.  .a8P",
-            " \"Y8888Y\" ",
-        ],
-        '6' => [
-            " ad8888ba ",
-            "d8\"      ",
-            "88       ",
-            "88PPPPba ",
-            "88     8b",
-            "Y8a.  .a8P",
-            " \"Y8888Y\" ",
-        ],
-        '7' => [
-            "888888888",
-            "      ,8P",
-            "     ,8P ",
-            "    ,8P  ",
-            "   ,8P   ",
-            "  ,8P    ",
-            " ,8P     ",
-        ],
-        '8' => [
-            " ad8888ba ",
-            "d8\"    \"8b",
-            "Y8a.  .a8P",
-            "  Y8888P ",
-            "d8\"    \"8b",
-            "Y8a.  .a8P",
-            " \"Y8888Y\" ",
-        ],
-        '9' => [
-            " ad8888ba ",
-            "d8\"    \"8b",
-            "Y8a.  .a8P",
-            " \"Y888888",
-            "       88",
-            "Y8a.  .a8P",
-            " \"Y8888Y\" ",
-        ],
-        ':' => [
-            "         ",
-            "   88    ",
-            "   88    ",
-            "         ",
-            "   88    ",
-            "   88    ",
-            "         ",
-        ],
-        _ => [
-            "         ",
-            "         ",
-            "         ",
-            "         ",
-            "         ",
-            "         ",
-            "         ",
-        ],
-    }
-}
-
-fn center_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    }
-}
-
-fn action_plan_lines(config: &Config, width: usize) -> Vec<Line<'static>> {
-    let description_width = (width / 3).clamp(8, 32);
-    let command_width = width.saturating_sub(description_width + 3).max(1);
-    let mut lines = Vec::new();
-    for (index, command) in build_action_commands(config).iter().enumerate() {
-        let descriptions = wrap_command(
-            &format!("{}. {}", index + 1, action_description(command, config)),
-            description_width,
-        );
-        let commands = wrap_command(&format!("$ {}", command.display()), command_width);
-        let dangerous = command.is_dangerous();
-        let description_style = Style::default()
-            .fg(if dangerous { Color::Red } else { Color::Cyan })
-            .add_modifier(Modifier::BOLD);
-        let command_style = Style::default().fg(if dangerous { Color::Red } else { Color::Green });
-        for row in 0..descriptions.len().max(commands.len()) {
-            let description = descriptions.get(row).map(String::as_str).unwrap_or("");
-            let padding = description_width.saturating_sub(Line::from(description).width());
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{description}{}", " ".repeat(padding)),
-                    description_style,
-                ),
-                Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    commands.get(row).cloned().unwrap_or_default(),
-                    command_style,
-                ),
-            ]));
-        }
-    }
-    lines
-}
-
-fn wrap_command(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut lines = Vec::new();
-    for source in text.split('\n') {
-        let mut current = String::new();
-        for ch in source.chars() {
-            if !current.is_empty() && Line::from(format!("{current}{ch}")).width() > width {
-                lines.push(std::mem::take(&mut current));
-            }
-            current.push(ch);
-        }
-        lines.push(current);
-    }
-    lines
-}
-
-fn split_list(value: &str, separator: char) -> Vec<String> {
-    value
-        .split(separator)
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::discord::{
         DiscordConfig, PresenceActivity, countdown_presence, post_countdown_presence,
     };
+    use crate::tui::fields::FIELDS;
+    use chrono::TimeZone;
 
     fn render_app(app: &mut App, width: u16, height: u16) -> String {
         let backend = ratatui::backend::TestBackend::new(width, height);
@@ -1991,34 +1371,6 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    #[test]
-    fn action_plan_pairs_descriptions_and_shell_in_aligned_columns() {
-        let mut config = quiet_config("25m");
-        config.actions.workspace.enabled = true;
-        config.actions.workspace.backend = "niri".to_string();
-        config.actions.workspace.number = 5;
-        for width in [34, 78, 104, 158] {
-            let lines = action_plan_lines(&config, width);
-            let first = &lines[0];
-            assert!(first.spans[0].content.starts_with("1. Switch"));
-            assert!(first.spans[2].content.starts_with("$ niri"));
-            assert_ne!(first.spans[0].style.fg, first.spans[2].style.fg);
-            assert!(lines.iter().all(|line| line.width() <= width));
-            assert_eq!(
-                lines
-                    .iter()
-                    .map(|line| line.spans[2].content.as_ref())
-                    .collect::<String>(),
-                "$ niri msg action focus-workspace 5"
-            );
-            assert!(
-                lines
-                    .iter()
-                    .all(|line| line.spans[0].width() == first.spans[0].width())
-            );
-        }
     }
 
     #[test]
@@ -2062,18 +1414,6 @@ mod tests {
         });
         let editing_rendered = render_app(&mut app, 160, 40);
         assert_safe_render(&editing_rendered);
-    }
-
-    #[test]
-    fn preview_wrapping_preserves_spaces_unicode_and_long_tokens() {
-        let command = format!("$ printf 'a  b猫' {}", "x".repeat(140));
-        let lines = wrap_command(&command, 20);
-        assert_eq!(lines.concat(), command);
-        assert!(
-            lines
-                .iter()
-                .all(|line| Line::from(line.as_str()).width() <= 20)
-        );
     }
 
     #[test]
@@ -2280,107 +1620,6 @@ mod tests {
 
         assert!(app.timer.is_none());
         assert!(app.status.starts_with("timer failed:"));
-    }
-
-    #[test]
-    fn wrap_command_keeps_lines_under_width() {
-        let lines = wrap_command(
-            "if command -v niri >/dev/null 2>&1; then niri msg action focus-workspace 3",
-            24,
-        );
-        assert!(lines.len() > 1);
-        assert!(lines.iter().all(|line| line.len() <= 24));
-    }
-
-    #[test]
-    fn split_list_trims_empty_values() {
-        assert_eq!(
-            split_list("firefox, telegram-desktop, ", ','),
-            vec!["firefox", "telegram-desktop"]
-        );
-    }
-
-    #[test]
-    fn timer_header_text_compacts_for_narrow_widths() {
-        let remaining = Duration::from_secs(65);
-
-        assert_eq!(format_time_left_text(None, remaining, 20), "not running");
-        assert_eq!(
-            format_time_left_text(Some(&dummy_timer_state()), remaining, 40),
-            "time left: 1m5s"
-        );
-        assert_eq!(
-            format_time_left_text(Some(&dummy_timer_state()), remaining, 12),
-            "left: 01:05"
-        );
-        assert_eq!(
-            format_time_left_text(Some(&dummy_timer_state()), remaining, 5),
-            "01:05"
-        );
-    }
-
-    #[test]
-    fn gauge_label_is_short_percent_only() {
-        assert_eq!(format_gauge_label(0.0), "  0%");
-        assert_eq!(format_gauge_label(0.58), " 58%");
-        assert_eq!(format_gauge_label(1.0), "100%");
-    }
-
-    #[test]
-    fn visible_fields_hide_disabled_action_settings() {
-        let mut config = quiet_config("25m");
-
-        let keys = visible_field_keys(&config);
-        assert!(keys.contains(&FieldKey::Duration));
-        assert!(keys.contains(&FieldKey::InhibitSleep));
-        assert!(keys.contains(&FieldKey::MediaEnabled));
-        assert!(keys.contains(&FieldKey::MonitorEnabled));
-        assert!(keys.contains(&FieldKey::NotifyEnabled));
-        assert!(!keys.contains(&FieldKey::MediaAction));
-        assert!(!keys.contains(&FieldKey::WorkspaceBackend));
-        assert!(!keys.contains(&FieldKey::WorkspaceNumber));
-        assert!(!keys.contains(&FieldKey::WorkspaceCommand));
-        assert!(!keys.contains(&FieldKey::BrightnessValue));
-        assert!(!keys.contains(&FieldKey::LockBackend));
-        assert!(!keys.contains(&FieldKey::LockCommand));
-        assert!(!keys.contains(&FieldKey::MonitorBackend));
-        assert!(!keys.contains(&FieldKey::MonitorCommand));
-        assert!(!keys.contains(&FieldKey::NotifyMessage));
-        assert!(!keys.contains(&FieldKey::KillProcesses));
-        assert!(!keys.contains(&FieldKey::CustomCommands));
-
-        config.actions.media.enabled = true;
-        config.actions.workspace.enabled = true;
-        config.actions.brightness.enabled = true;
-        config.actions.lock.enabled = true;
-        config.actions.monitor.enabled = true;
-        config.actions.notify.enabled = true;
-        config.actions.kill.enabled = true;
-        config.actions.custom.enabled = true;
-
-        let keys = visible_field_keys(&config);
-        assert!(keys.contains(&FieldKey::MediaAction));
-        assert!(keys.contains(&FieldKey::WorkspaceBackend));
-        assert!(keys.contains(&FieldKey::WorkspaceNumber));
-        assert!(keys.contains(&FieldKey::WorkspaceCommand));
-        assert!(keys.contains(&FieldKey::BrightnessValue));
-        assert!(keys.contains(&FieldKey::LockBackend));
-        assert!(keys.contains(&FieldKey::LockCommand));
-        assert!(keys.contains(&FieldKey::MonitorBackend));
-        assert!(keys.contains(&FieldKey::MonitorCommand));
-        assert!(keys.contains(&FieldKey::NotifyMessage));
-        assert!(keys.contains(&FieldKey::KillProcesses));
-        assert!(keys.contains(&FieldKey::CustomCommands));
-    }
-
-    #[test]
-    fn ascii_time_rows_have_equal_width() {
-        let rows = ascii_time("14:45:27");
-        let width = rows.first().map(String::len).unwrap_or(0);
-
-        assert_eq!(rows.len(), 7);
-        assert!(width > 0);
-        assert!(rows.iter().all(|row| row.len() == width));
     }
 
     #[test]
