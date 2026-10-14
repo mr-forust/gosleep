@@ -363,6 +363,7 @@ pub(crate) fn split_list(value: &str, separator: char) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use chrono::{Local, TimeZone};
 
     fn quiet_config(duration: &str) -> Config {
         let mut config = Config {
@@ -443,5 +444,24 @@ mod tests {
         assert!(keys.contains(&FieldKey::NotifyMessage));
         assert!(keys.contains(&FieldKey::KillProcesses));
         assert!(keys.contains(&FieldKey::CustomCommands));
+    }
+
+    #[test]
+    #[ignore = "run with TZ=Europe/Bratislava to check local daylight saving transitions"]
+    fn local_deadlines_handle_daylight_saving_transitions() {
+        let spring = Local.with_ymd_and_hms(2026, 3, 29, 1, 30, 0).unwrap();
+        assert!(duration_until(parse_clock_time("02:30").unwrap(), spring).is_err());
+        assert_eq!(
+            duration_until(parse_clock_time("03:30").unwrap(), spring).unwrap(),
+            Duration::from_secs(3600)
+        );
+        let fall = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 25, 0, 45, 0)
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!(
+            duration_until(parse_clock_time("02:30").unwrap(), fall).unwrap(),
+            Duration::from_secs(2700)
+        );
     }
 }
