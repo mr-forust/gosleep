@@ -7,6 +7,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::discord::DiscordConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Config {
@@ -102,28 +104,6 @@ pub(crate) struct PowerAction {
 pub(crate) struct CustomAction {
     pub(crate) enabled: bool,
     pub(crate) commands: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub(crate) struct DiscordConfig {
-    pub(crate) enabled: bool,
-    pub(crate) application_id: String,
-}
-
-impl Default for DiscordConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            application_id: String::new(),
-        }
-    }
-}
-
-impl DiscordConfig {
-    pub(crate) fn should_connect(&self) -> bool {
-        self.enabled && !self.application_id.trim().is_empty()
-    }
 }
 
 impl Default for Config {
