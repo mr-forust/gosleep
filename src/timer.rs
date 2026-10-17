@@ -34,6 +34,7 @@ pub(crate) struct HistoryEntry {
 pub(crate) struct TimerReport {
     pub(crate) started_at: u64,
     pub(crate) duration: Duration,
+    pub(crate) countdown_finished_at: u64,
     pub(crate) sleep_started_at: Option<u64>,
     pub(crate) actions: Vec<String>,
     pub(crate) failures: Vec<String>,
@@ -273,7 +274,7 @@ pub(crate) fn run_timer(
     }
     // Successful completion transitions instead of clearing. Only a real,
     // fully successful action run represents a sleep interval, so only then
-    // publish the elapsed start timestamp without state text. Dry-run,
+    // publish the elapsed start timestamp with the `Sleeping for:` state. Dry-run,
     // --no-actions, failures, and empty action lists keep the accurate
     // timestamp-free `finished` state. The disarmed guard is returned so the
     // caller retains the status; Discord clears it on process exit/poweroff.
@@ -290,6 +291,7 @@ pub(crate) fn run_timer(
     let report = TimerReport {
         started_at,
         duration,
+        countdown_finished_at: sleep_start_unix,
         sleep_started_at,
         actions: actions.iter().map(ActionCommand::display).collect(),
         failures: failures.clone(),
@@ -360,6 +362,7 @@ mod tests {
         let report = TimerReport {
             started_at: 1_700_000_000,
             duration: Duration::from_secs(90),
+            countdown_finished_at: 1_700_000_090,
             sleep_started_at: None,
             actions: vec!["true".to_string()],
             failures: Vec::new(),

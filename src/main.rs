@@ -80,7 +80,6 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::config::Config;
     use crate::discord::{
         DiscordConfig, DiscordPresence, PresenceActivity, countdown_presence,

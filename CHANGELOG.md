@@ -6,6 +6,17 @@ The project uses semantic versioning. Tags are formatted as `vMAJOR.MINOR.PATCH`
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-17
+
+### Changed
+
+- Extract configuration, actions, Discord, timer, CLI, and TUI modules.
+- Show the Discord sleeping label after successful actions.
+
+### Fixed
+
+- Show elapsed time after countdown-only runs and clear it when a new timer starts.
+
 ## [1.5.0] - 2026-10-12
 
 ### Added

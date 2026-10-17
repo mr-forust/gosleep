@@ -120,6 +120,7 @@ struct App {
     action_log: Vec<String>,
     sleep_presence: Option<DiscordPresence>,
     sleep_started_at: Option<u64>,
+    countdown_finished_at: Option<u64>,
 }
 
 struct TimerState {
@@ -148,6 +149,7 @@ impl App {
             action_log: Vec::new(),
             sleep_presence: None,
             sleep_started_at: None,
+            countdown_finished_at: None,
         }
     }
 
@@ -386,17 +388,23 @@ impl App {
                 ),
             header[0],
         );
-        let status = self.sleep_started_at.map_or_else(
-            || self.status.clone(),
-            |started_at| {
-                format!(
-                    "slept for {}",
-                    format_duration(Duration::from_secs(
-                        unix_timestamp().saturating_sub(started_at)
-                    ))
-                )
-            },
-        );
+        let status = if let Some(started_at) = self.sleep_started_at {
+            format!(
+                "slept for {}",
+                format_duration(Duration::from_secs(
+                    unix_timestamp().saturating_sub(started_at)
+                ))
+            )
+        } else if let Some(finished_at) = self.countdown_finished_at {
+            format!(
+                "finished {} ago",
+                format_duration(Duration::from_secs(
+                    unix_timestamp().saturating_sub(finished_at)
+                ))
+            )
+        } else {
+            self.status.clone()
+        };
         frame.render_widget(
             Paragraph::new(status)
                 .alignment(Alignment::Center)
@@ -556,11 +564,11 @@ impl App {
             }
         } else {
             lines = action_plan_lines(&self.config, usize::from(area.width.saturating_sub(2)));
-            if lines.is_empty() {
-                lines.push(Line::from("No actions enabled; countdown only."));
-            }
         }
-        let title = if self.show_log {
+        let countdown_only = !self.show_log && lines.is_empty();
+        let title = if countdown_only {
+            ""
+        } else if self.show_log {
             "results"
         } else if area.width < 60 {
             "plan / commands"
@@ -575,10 +583,13 @@ impl App {
 
         // Use the unused space below a short plan or results list for a timer.
         // If the content is long, keep the existing scrollable view unchanged.
-        let show_elapsed = self.show_log && self.sleep_started_at.is_some();
+        let show_elapsed = self.show_log && self.countdown_finished_at.is_some();
         let show_card = (!self.show_log || show_elapsed)
             && inner.width >= 50
             && usize::from(inner.height) >= lines.len().saturating_add(10);
+        if countdown_only && !show_card {
+            lines.push(Line::from("No actions enabled."));
+        }
         let range = if show_card {
             String::new()
         } else {
@@ -620,14 +631,14 @@ impl App {
                 height: inner.height.saturating_sub(plan_height),
             };
             let (card_title, duration_text, footer) =
-                if let Some(started_at) = self.sleep_started_at.filter(|_| show_elapsed) {
-                    let elapsed = Duration::from_secs(unix_timestamp().saturating_sub(started_at));
+                if let Some(finished_at) = self.countdown_finished_at.filter(|_| show_elapsed) {
+                    let elapsed = Duration::from_secs(unix_timestamp().saturating_sub(finished_at));
                     let started_local =
-                        DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(started_at));
+                        DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(finished_at));
                     (
-                        "SLEPT FOR",
+                        self.sleep_started_at.map(|_| "SLEPT FOR"),
                         format_compact_duration(elapsed),
-                        format!("since timer ended at {}", started_local.format("%H:%M")),
+                        format!("since {}", started_local.format("%H:%M")),
                     )
                 } else {
                     let now = Local::now();
@@ -650,16 +661,19 @@ impl App {
                         "actions"
                     };
                     (
-                        "TIME LEFT",
+                        None,
                         duration_text,
                         format!("ENDS AT {finish_text}  ·  {action_count} {action_label}"),
                     )
                 };
 
-            let mut card_lines = vec![Line::styled(
-                card_title,
-                Style::default().fg(Color::DarkGray),
-            )];
+            let mut card_lines = Vec::new();
+            if let Some(card_title) = card_title.filter(|_| !countdown_only) {
+                card_lines.push(Line::styled(
+                    card_title,
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
             let large_timer = ascii_time(&duration_text);
             if let Some(sample) = large_timer.first()
                 && sample.len() <= usize::from(card_area.width.saturating_sub(2))
@@ -681,7 +695,9 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ));
             }
-            card_lines.push(Line::styled(footer, Style::default().fg(Color::Gray)));
+            if !countdown_only {
+                card_lines.push(Line::styled(footer, Style::default().fg(Color::Gray)));
+            }
             let card_height = u16::try_from(card_lines.len()).unwrap_or(card_area.height);
             frame.render_widget(
                 Paragraph::new(card_lines)
@@ -894,6 +910,8 @@ impl App {
         let (sender, updates) = mpsc::channel();
         self.action_log.clear();
         self.preview_offset = 0;
+        self.sleep_started_at = None;
+        self.countdown_finished_at = None;
         let handle = thread::spawn(move || {
             let mut output = UpdateWriter {
                 sender,
@@ -948,6 +966,7 @@ impl App {
             self.status = "timer stopped".to_string();
         }
         self.sleep_started_at = None;
+        self.countdown_finished_at = None;
     }
 
     fn reap_timer(&mut self) {
@@ -975,11 +994,12 @@ impl App {
         match result {
             Ok(Ok((report, sleep_presence))) => {
                 // Retain the disarmed post-countdown guard while the TUI stays
-                // open so the green elapsed timer (or `finished`) remains visible.
+                // open so elapsed time since countdown completion remains visible.
                 // Dropping `App` closes the IPC connection and lets Discord
                 // clear it; `stop_timer` clears it explicitly on stop/quit.
                 self.sleep_presence = Some(sleep_presence);
                 self.sleep_started_at = report.sleep_started_at;
+                self.countdown_finished_at = Some(report.countdown_finished_at);
                 self.show_log = true;
                 self.preview_offset = 0;
                 let status = if report.failures.is_empty() {
@@ -1191,6 +1211,27 @@ mod tests {
         });
         let editing_rendered = render_app(&mut app, 160, 40);
         assert_safe_render(&editing_rendered);
+    }
+
+    #[test]
+    fn countdown_only_preview_shows_only_the_countdown() {
+        let mut app = App::new(PathBuf::from("/tmp/layout.yaml"), quiet_config("25m"));
+        let rendered = render_app(&mut app, 160, 40);
+        assert!(rendered.contains("ad8888ba"), "{rendered}");
+        assert!(!rendered.contains("TIME LEFT"), "{rendered}");
+        assert!(!rendered.contains("ENDS AT"), "{rendered}");
+        assert!(!rendered.contains("plan / commands"), "{rendered}");
+        assert!(!rendered.contains("0 actions"), "{rendered}");
+        assert!(!rendered.contains("countdown only"), "{rendered}");
+
+        let mut app = App::new(PathBuf::from("/tmp/layout.yaml"), quiet_config("25m"));
+        let rendered = render_app(&mut app, 80, 24);
+        assert!(rendered.contains("No actions enabled."), "{rendered}");
+
+        let mut app = App::new(PathBuf::from("/tmp/layout.yaml"), Config::default());
+        let rendered = render_app(&mut app, 160, 40);
+        assert!(!rendered.contains("TIME LEFT"), "{rendered}");
+        assert!(rendered.contains("ENDS AT"), "{rendered}");
     }
 
     #[test]
@@ -1411,6 +1452,40 @@ mod tests {
     }
 
     #[test]
+    fn countdown_only_result_shows_elapsed_time_since_countdown_finished() {
+        let mut app = App::new(
+            PathBuf::from("/tmp/countdown-only-result.yaml"),
+            quiet_config("2s"),
+        );
+        app.action_log = vec![
+            "timer started: 2s".to_string(),
+            "countdown finished".to_string(),
+        ];
+        let finished_at = unix_timestamp().saturating_sub(5);
+        app.apply_timer_result(Ok(Ok((
+            TimerReport {
+                started_at: finished_at.saturating_sub(2),
+                duration: Duration::from_secs(2),
+                countdown_finished_at: finished_at,
+                sleep_started_at: None,
+                actions: Vec::new(),
+                failures: Vec::new(),
+                dry_run: false,
+                no_actions: false,
+            },
+            DiscordPresence::inactive(),
+        ))));
+
+        let rendered = render_app(&mut app, 160, 40);
+        assert!(rendered.contains("finished "), "{rendered}");
+        assert!(rendered.contains(" ago"), "{rendered}");
+        assert!(!rendered.contains("ELAPSED"), "{rendered}");
+        assert!(rendered.contains("since "), "{rendered}");
+        assert!(!rendered.contains("timer ended"), "{rendered}");
+        assert!(!rendered.contains("SLEPT FOR"), "{rendered}");
+    }
+
+    #[test]
     fn tui_retains_sleeping_guard_until_stop_and_clears_on_stop() {
         // Completion stores the disarmed guard on the App for retention while
         // the TUI stays open; stopping clears it explicitly.
@@ -1425,6 +1500,7 @@ mod tests {
             TimerReport {
                 started_at: 0,
                 duration: Duration::from_secs(60),
+                countdown_finished_at: 1000,
                 sleep_started_at: Some(1000),
                 actions: vec!["true".to_string()],
                 failures: Vec::new(),
@@ -1438,6 +1514,7 @@ mod tests {
         // `stop_timer` with no running timer clears the retained guard.
         app.stop_timer();
         assert!(app.sleep_presence.is_none());
+        assert!(app.countdown_finished_at.is_none());
         assert_eq!(app.status, "timer stopped");
     }
 
@@ -1455,6 +1532,7 @@ mod tests {
                 TimerReport {
                     started_at: 0,
                     duration: Duration::from_secs(1),
+                    countdown_finished_at: 1000,
                     sleep_started_at: None,
                     actions: Vec::new(),
                     failures: Vec::new(),

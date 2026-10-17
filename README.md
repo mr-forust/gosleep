@@ -250,6 +250,7 @@ Dangerous actions such as `pkill`, power actions, and common destructive custom 
 Completed timer sessions are appended to `history.yaml` next to the active config file.
 If no poweroff or reboot action is configured, CLI `run` asks for wake confirmation after the timer finishes and records the elapsed sleep time.
 After successful actions, the TUI keeps a live `slept for` counter. It starts when the countdown ends, just before post-countdown actions run, so it includes their execution time.
+If the countdown ends without successful actions, the TUI results view shows elapsed time since the countdown ended.
 
 ## Discord Rich Presence
 
@@ -296,7 +297,7 @@ change by phase:
 | Running | — | Countdown end timestamp shown as Discord's green timer |
 | Running with `actions.power.mode: poweroff` | — | Countdown end timestamp shown as Discord's green timer |
 | Paused | `paused` (plus the poweroff suffix only for exact `poweroff`) | None, so no stale countdown is shown |
-| After successful real actions | — | Start timestamp at the beginning of post-countdown actions, so Discord shows only its green elapsed timer |
+| After successful real actions | `Sleeping for:` | Start timestamp at the beginning of post-countdown actions, so Discord shows its green elapsed timer |
 | Dry-run, `--no-actions`, action failures, or no enabled actions | `finished` | None, so no sleep interval is claimed |
 | Stopped or cancelled | Presence is cleared | — |
 

@@ -194,11 +194,12 @@ pub(crate) fn post_countdown_presence() -> PresenceActivity {
 /// Post-countdown elapsed timestamp for successful real-action runs (US-004).
 ///
 /// `sleep_start_unix` is captured at the start of post-countdown actions. The
-/// green elapsed counter comes from `start_timestamp`; no state text is sent.
+/// state label replaces the previous `finished` state, and the green elapsed
+/// counter comes from `start_timestamp`.
 pub(crate) fn sleeping_presence(sleep_start_unix: u64) -> PresenceActivity {
     PresenceActivity {
         details: "Sleep timer".to_string(),
-        state: String::new(),
+        state: "Sleeping for:".to_string(),
         start_timestamp: Some(sleep_start_unix),
         end_timestamp: None,
     }
@@ -207,7 +208,7 @@ pub(crate) fn sleeping_presence(sleep_start_unix: u64) -> PresenceActivity {
 /// Pure post-run presence selector (US-004).
 ///
 /// Only a real, fully successful action run represents a sleep interval and
-/// gets the green elapsed timestamp without state text. Dry-run, `--no-actions`,
+/// gets the green elapsed timestamp with the `Sleeping for:` state. Dry-run, `--no-actions`,
 /// failures, and empty action lists keep the accurate timestamp-free `finished`
 /// state so Discord never shows a misleading sleep timer.
 pub(crate) fn post_run_presence(
@@ -580,15 +581,15 @@ mod tests {
     }
 
     #[test]
-    fn sleeping_presence_shows_elapsed_start_without_end() {
+    fn sleeping_presence_labels_elapsed_start_without_end() {
         let activity = sleeping_presence(1_700_000_000);
         assert_eq!(activity.details, "Sleep timer");
-        assert!(activity.state.is_empty());
+        assert_eq!(activity.state, "Sleeping for:");
         assert_eq!(activity.start_timestamp, Some(1_700_000_000));
         assert_eq!(activity.end_timestamp, None);
 
         let payload = presence_activity_payload(&activity, 1234, "nonce-s1");
-        assert!(payload["args"]["activity"].get("state").is_none());
+        assert_eq!(payload["args"]["activity"]["state"], "Sleeping for:");
         assert_eq!(
             payload["args"]["activity"]["timestamps"]["start"],
             1_700_000_000
@@ -604,7 +605,7 @@ mod tests {
     #[test]
     fn post_run_presence_only_claims_sleep_for_real_success() {
         let sleeping = post_run_presence(false, false, false, true, 1000);
-        assert!(sleeping.state.is_empty());
+        assert_eq!(sleeping.state, "Sleeping for:");
         assert_eq!(sleeping.start_timestamp, Some(1000));
         assert_eq!(sleeping.end_timestamp, None);
 
